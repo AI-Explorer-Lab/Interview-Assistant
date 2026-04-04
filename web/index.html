@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Interview-Assistant</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <p class="brand-kicker">LOCAL AI INTERVIEW OS</p>
+          <h1>Interview-Assistant</h1>
+          <p class="brand-copy">为 LLM / Agent 求职链路做的本地工作台。</p>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" data-view="dashboard">总览</button>
+          <button class="nav-item" data-view="config">模型配置</button>
+          <button class="nav-item" data-view="assets">素材库</button>
+          <button class="nav-item" data-view="resume-analysis">简历分析</button>
+          <button class="nav-item" data-view="mock-interview">模拟面试</button>
+          <button class="nav-item" data-view="interview-review">面试评价</button>
+          <button class="nav-item" data-view="learning">学习总结</button>
+          <button class="nav-item" data-view="open-source">开源项目阅读</button>
+          <button class="nav-item" data-view="general-chat">普通对话</button>
+          <button class="nav-item" data-view="history">历史记录</button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="status-block">
+            <span>Workspace</span>
+            <strong id="workspacePath">-</strong>
+          </div>
+          <div class="status-block">
+            <span>当前文档</span>
+            <strong id="activeDocument">-</strong>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">INTERVIEW WORKBENCH</p>
+            <h2 id="viewTitle">总览</h2>
+          </div>
+          <div class="topbar-actions">
+            <button class="ghost-btn" id="refreshBtn">刷新数据</button>
+          </div>
+        </header>
+
+        <section class="view active" data-view="dashboard">
+          <div class="hero">
+            <div class="hero-copy">
+              <p class="eyebrow">MVP READY</p>
+              <h3>先把简历和项目放进素材库，再让每个模块复用。</h3>
+              <p>默认是 Demo 模式，打开就能试交互；填入真实模型参数后，就会走真实大模型调用。</p>
+            </div>
+            <div class="hero-panels">
+              <article class="metric-card">
+                <span>简历素材</span>
+                <strong id="metricResumes">0</strong>
+              </article>
+              <article class="metric-card">
+                <span>项目素材</span>
+                <strong id="metricProjects">0</strong>
+              </article>
+              <article class="metric-card">
+                <span>结果文档</span>
+                <strong id="metricRuns">0</strong>
+              </article>
+              <article class="metric-card">
+                <span>面试记录</span>
+                <strong id="metricInterviews">0</strong>
+              </article>
+            </div>
+          </div>
+
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>最近文档</h3>
+              </div>
+              <div id="recentRuns" class="stack"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>最近面试</h3>
+              </div>
+              <div id="recentInterviews" class="stack"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="config">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>模型配置</h3>
+              </div>
+              <form id="configForm" class="form stack">
+                <label>
+                  <span>Workspace 路径</span>
+                  <input type="text" name="workspace_path" />
+                </label>
+                <div class="row-actions">
+                  <button type="button" class="ghost-btn" id="applyWorkspaceBtn">&#24212;&#29992;&#24403;&#21069; Workspace</button>
+                  <button type="button" class="ghost-btn" id="clearWorkspaceBtn">&#28165;&#38500;&#35206;&#30422;</button>
+                </div>
+                <input type="hidden" name="provider_id" />
+                <label>
+                  <span>已保存供应商</span>
+                  <select name="saved_provider_id" id="savedProviderSelect"></select>
+                </label>
+                <div class="row-actions">
+                  <button type="button" class="ghost-btn" id="newProviderBtn">新建配置</button>
+                  <button type="button" class="ghost-btn" id="deleteProviderBtn">删除当前</button>
+                  <button type="button" class="ghost-btn" id="setDefaultProviderBtn">&#35774;&#20026;&#40664;&#35748;</button>
+                </div>
+                <label>
+                  <span>默认供应商</span>
+                  <select name="default_provider_id" id="defaultProviderSelect"></select>
+                </label>
+                <label>
+                  <span>供应商名称</span>
+                  <input type="text" name="provider_label" />
+                </label>
+                <label>
+                  <span>接口类型</span>
+                  <select name="provider_type">
+                    <option value="demo">Demo</option>
+                    <option value="openai">OpenAI Compatible</option>
+                    <option value="anthropic">Anthropic</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Base URL</span>
+                  <input type="text" name="base_url" />
+                </label>
+                <label>
+                  <span>API Key</span>
+                  <input type="password" name="api_key" />
+                </label>
+                <label>
+                  <span>Model</span>
+                  <input type="text" name="model_name" />
+                </label>
+                <label>
+                  <span>Temperature</span>
+                  <input type="number" step="0.1" min="0" max="2" name="temperature" placeholder="留空则不传" />
+                </label>
+                <label>
+                  <span>Max Tokens</span>
+                  <input type="number" min="1" name="max_tokens" placeholder="留空则不传" />
+                </label>
+                <label>
+                  <span>Reasoning</span>
+                  <select name="reasoning_effort">
+                    <option value="">不指定</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="extra-high">extra-high</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Timeout Seconds</span>
+                  <input type="number" min="10" name="timeout_seconds" placeholder="留空则不传" />
+                </label>
+                <div class="row-actions">
+                  <button type="submit" class="primary-btn">保存当前供应商配置</button>
+                  <button type="button" class="ghost-btn" id="testProviderBtn">测试连通</button>
+                </div>
+                <p class="input-hint" id="configStatus">可先保存配置，再点击测试连通。</p>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>使用说明</h3>
+              </div>
+              <div class="markdown-body">
+                <p><strong>Demo 模式</strong>：不需要 API Key，适合先看页面和工作流。</p>
+                <p><strong>OpenAI Compatible</strong>：适合 Codex / OpenAI 兼容接口或其他兼容服务。</p>
+                <p><strong>Anthropic</strong>：适合 Claude API。</p>
+                <p>配置保存后，所有模块都会按这里的参数调用。</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="assets">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>上传简历</h3>
+              </div>
+              <form id="resumeUploadForm" class="form stack">
+                <label>
+                  <span>素材名称</span>
+                  <input type="text" name="name" placeholder="例如：张三-LLM简历" />
+                </label>
+                <label>
+                  <span>Markdown 文件</span>
+                  <input type="file" name="file" accept=".md,text/markdown" />
+                </label>
+                <button type="submit" class="primary-btn">上传简历</button>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>上传项目</h3>
+              </div>
+              <form id="projectUploadForm" class="form stack">
+                <label>
+                  <span>项目名称</span>
+                  <input type="text" name="name" placeholder="例如：企业知识库 RAG" />
+                </label>
+                <label>
+                  <span>项目目录</span>
+                  <input type="file" name="files" webkitdirectory directory multiple />
+                </label>
+                <button type="submit" class="primary-btn">上传项目目录</button>
+              </form>
+              <form id="projectPathImportForm" class="form stack">
+                <label>
+                  <span>大型项目建议直接填本地目录路径</span>
+                  <input type="text" name="directory_path" placeholder="例如：F:\projects\chat-llm" />
+                </label>
+                <label>
+                  <span>素材名称</span>
+                  <input type="text" name="name" placeholder="不填则默认取目录名" />
+                </label>
+                <button type="submit" class="ghost-btn">按本地路径导入</button>
+              </form>
+            </article>
+          </div>
+
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>简历素材库</h3>
+              </div>
+              <div id="resumeAssetList" class="stack"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>项目素材库</h3>
+              </div>
+              <div id="projectAssetList" class="stack"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="resume-analysis">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>生成简历分析</h3>
+              </div>
+              <form id="resumeAnalysisForm" class="form stack">
+                <label>
+                  <span>选择简历</span>
+                  <select name="resume_asset_id" id="resumeAnalysisResume"></select>
+                </label>
+                <label>
+                  <span>选择模型</span>
+                  <select name="provider_id" id="resumeAnalysisProvider"></select>
+                </label>
+                <fieldset class="check-list">
+                  <legend>选择项目素材</legend>
+                  <div id="resumeAnalysisProjects" class="stack compact"></div>
+                </fieldset>
+                <button type="submit" class="primary-btn">生成分析</button>
+                <p class="input-hint" id="resumeAnalysisStatus">等待执行。</p>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>分析结果</h3>
+              </div>
+              <div class="result-toolbar">
+                <button class="ghost-btn" id="resumeAnalysisPreviewBtn">预览</button>
+                <button class="ghost-btn" id="resumeAnalysisSourceBtn">源码</button>
+              </div>
+              <div id="resumeAnalysisResult" class="markdown-shell"></div>
+            </article>
+          </div>
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>简历互动修改</h3>
+              </div>
+              <p class="input-hint" id="resumeCoachStatus">先生成一版简历分析，然后在这里边聊边改。</p>
+              <div id="resumeCoachChat" class="chat-shell"></div>
+              <form id="resumeCoachForm" class="stack">
+                <textarea name="message" rows="4" placeholder="例如：请把项目经历改成 STAR 表达，并给出可直接替换的版本。"></textarea>
+                <button type="submit" class="primary-btn">发送修改请求</button>
+              </form>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="mock-interview">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>启动模拟面试</h3>
+              </div>
+              <form id="mockInterviewForm" class="form stack">
+                <label>
+                  <span>选择简历</span>
+                  <select name="resume_asset_id" id="mockInterviewResume"></select>
+                </label>
+                <label>
+                  <span>选择模型</span>
+                  <select name="provider_id" id="mockInterviewProvider"></select>
+                </label>
+                <fieldset class="check-list">
+                  <legend>选择项目素材</legend>
+                  <div id="mockInterviewProjects" class="stack compact"></div>
+                </fieldset>
+                <label>
+                  <span>引用已有简历分析</span>
+                  <select name="analysis_run_id" id="mockInterviewAnalysis"></select>
+                </label>
+                <button type="submit" class="primary-btn">开始面试</button>
+                <p class="input-hint" id="mockInterviewStatus">等待执行。</p>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>对话区</h3>
+              </div>
+              <div id="interviewChat" class="chat-shell"></div>
+              <form id="interviewReplyForm" class="stack">
+                <textarea name="answer" rows="5" placeholder="输入候选人的回答"></textarea>
+                <div class="row-actions">
+                  <button type="button" class="ghost-btn" id="startVoiceBtn">开始语音转文字</button>
+                  <button type="button" class="ghost-btn" id="stopVoiceBtn">停止录音</button>
+                  <button type="submit" class="primary-btn">发送回答</button>
+                  <button type="button" class="ghost-btn" id="endInterviewBtn">结束面试并生成评价</button>
+                </div>
+                <p class="input-hint" id="voiceStatus">语音功能依赖浏览器原生识别，推荐使用 Edge / Chrome。</p>
+              </form>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="interview-review">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>生成 / 重生成面试评价</h3>
+              </div>
+              <form id="reviewForm" class="form stack">
+                <label>
+                  <span>选择面试记录</span>
+                  <select name="interview_id" id="reviewInterviewSelect"></select>
+                </label>
+                <label>
+                  <span>选择模型</span>
+                  <select name="provider_id" id="reviewProvider"></select>
+                </label>
+                <button type="submit" class="primary-btn">生成评价</button>
+                <p class="input-hint" id="reviewStatus">等待执行。</p>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>评价结果</h3>
+              </div>
+              <div class="result-toolbar">
+                <button class="ghost-btn" id="reviewPreviewBtn">预览</button>
+                <button class="ghost-btn" id="reviewSourceBtn">源码</button>
+              </div>
+              <div id="reviewResult" class="markdown-shell"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="learning">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>生成学习总结</h3>
+              </div>
+              <form id="learningForm" class="form stack">
+                <label>
+                  <span>选择面试评价</span>
+                  <select name="review_run_id" id="learningReviewSelect"></select>
+                </label>
+                <label>
+                  <span>选择模型</span>
+                  <select name="provider_id" id="learningProvider"></select>
+                </label>
+                <fieldset class="check-list">
+                  <legend>补充项目素材</legend>
+                  <div id="learningProjects" class="stack compact"></div>
+                </fieldset>
+                <button type="submit" class="primary-btn">生成学习总结</button>
+                <p class="input-hint" id="learningStatus">等待执行。</p>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>学习结果</h3>
+              </div>
+              <div class="result-toolbar">
+                <button class="ghost-btn" id="learningPreviewBtn">预览</button>
+                <button class="ghost-btn" id="learningSourceBtn">源码</button>
+              </div>
+              <div id="learningResult" class="markdown-shell"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="open-source">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>生成项目解读</h3>
+              </div>
+              <form id="openSourceForm" class="form stack">
+                <label>
+                  <span>选择项目</span>
+                  <select name="project_asset_id" id="openSourceProject"></select>
+                </label>
+                <label>
+                  <span>选择模型</span>
+                  <select name="provider_id" id="openSourceProvider"></select>
+                </label>
+                <label>
+                  <span>自定义模板</span>
+                  <textarea name="template" rows="8" placeholder="可选。不填则按默认模板输出。"></textarea>
+                </label>
+                <button type="submit" class="primary-btn">生成解读</button>
+                <p class="input-hint" id="openSourceStatus">等待执行。</p>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>项目解读结果</h3>
+              </div>
+              <div class="result-toolbar">
+                <button class="ghost-btn" id="openSourcePreviewBtn">预览</button>
+                <button class="ghost-btn" id="openSourceSourceBtn">源码</button>
+              </div>
+              <div id="openSourceResult" class="markdown-shell"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="general-chat">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>普通对话</h3>
+              </div>
+              <form id="generalChatForm" class="stack">
+                <label>
+                  <span>选择模型</span>
+                  <select name="provider_id" id="generalChatProvider"></select>
+                </label>
+                <p class="input-hint" id="generalChatStatus">可用于任何非模块化问题交流。</p>
+                <textarea name="message" rows="5" placeholder="输入你想和 AI 讨论的问题"></textarea>
+                <div class="row-actions">
+                  <button type="submit" class="primary-btn">发送</button>
+                  <button type="button" class="ghost-btn" id="generalChatClearBtn">清空会话</button>
+                </div>
+              </form>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h3>对话记录</h3>
+              </div>
+              <div id="generalChatShell" class="chat-shell"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="history">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>文档列表</h3>
+              </div>
+              <label class="inline-filter">
+                <span>模块筛选</span>
+                <select id="historyModuleFilter">
+                  <option value="">全部</option>
+                  <option value="resume_analysis">简历分析</option>
+                  <option value="interview_review">面试评价</option>
+                  <option value="learning">学习总结</option>
+                  <option value="open_source_reading">开源项目阅读</option>
+                  <option value="general_chat">普通对话</option>
+                  <option value="mock_interview">&#27169;&#25311;&#38754;&#35797;</option>
+                </select>
+              </label>
+              <div id="historyList" class="stack"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>文档查看与批注</h3>
+              </div>
+              <div class="result-toolbar">
+                <button class="ghost-btn" id="historyPreviewBtn">预览</button>
+                <button class="ghost-btn" id="historySourceBtn">源码</button>
+                <button class="ghost-btn" id="historyEditBtn">编辑源码</button>
+                <button class="ghost-btn" id="historySaveBtn">保存修改</button>
+              </div>
+              <div id="historyDocument" class="markdown-shell"></div>
+              <p class="input-hint">在“编辑源码”模式下可直接修改文档原文并保存，批注会继续追加到当前文档。</p>
+              <form id="commentForm" class="stack comment-form">
+                <textarea name="comment" rows="4" placeholder="输入批注，例如：批注：这里能否补充更多工程指标？"></textarea>
+                <button type="submit" class="primary-btn">追加批注回复</button>
+              </form>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
