@@ -714,8 +714,14 @@ def chat_completion_from_messages(provider_cfg: Dict, system_prompt: str, messag
         method="POST",
     )
     timeout = int(provider_cfg.get("timeout_seconds") or 90)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"OpenAI 调用失败，HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenAI 调用失败，网络错误: {exc}") from exc
     choices = data.get("choices") or []
     if not choices:
         raise RuntimeError("对话模型没有返回 choices")
@@ -766,8 +772,14 @@ def openai_chat_completion(model_cfg: Dict, system_prompt: str, user_prompt: str
         method="POST",
     )
     timeout = int(model_cfg.get("timeout_seconds") or 90)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"OpenAI 调用失败，HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenAI 调用失败，网络错误: {exc}") from exc
     choices = data.get("choices") or []
     if not choices:
         raise RuntimeError("模型没有返回 choices")
