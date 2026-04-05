@@ -1,6 +1,6 @@
 ---
 name: 面试总结学习助手
-description: This skill should be used when the user asks to "learning from interviews", "面试知识点".
+description: This skill should be used when the user asks to "learning from interviews", "面试复盘".
 version: 0.1.0
 ---
 
