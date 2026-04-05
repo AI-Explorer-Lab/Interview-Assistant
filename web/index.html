@@ -3,16 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1f2d2a" />
     <title>Interview-Assistant</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <div class="shell">
-      <aside class="sidebar">
-        <div class="brand">
-          <p class="brand-kicker">LOCAL AI INTERVIEW OS</p>
-          <h1>Interview-Assistant</h1>
-          <p class="brand-copy">为 LLM / Agent 求职链路做的本地工作台。</p>
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-top">
+          <div class="brand">
+            <p class="brand-kicker">LOCAL AI INTERVIEW OS</p>
+            <h1>Interview-Assistant</h1>
+            <p class="brand-copy">为 LLM / Agent 求职链路打造的本地工作台，把素材、分析、面试与复盘串成一条顺手的流程。</p>
+          </div>
+          <button type="button" class="ghost-btn sidebar-close" id="sidebarCloseBtn">关闭导航</button>
         </div>
 
         <nav class="nav">
@@ -33,45 +37,94 @@
             <span>Workspace</span>
             <strong id="workspacePath">-</strong>
           </div>
+          <div class="status-block">
+            <span>流程进度</span>
+            <strong id="sidebarProgress">0 / 4</strong>
+            <p class="status-copy" id="sidebarProgressHint">先从上传简历和项目素材开始。</p>
+          </div>
         </div>
       </aside>
 
       <main class="main">
         <header class="topbar">
-          <div>
-            <p class="eyebrow">INTERVIEW WORKBENCH</p>
-            <h2 id="viewTitle">总览</h2>
+          <div class="topbar-title">
+            <button type="button" class="ghost-btn nav-toggle" id="navToggleBtn">导航</button>
+            <div>
+              <p class="eyebrow">INTERVIEW WORKBENCH</p>
+              <h2 id="viewTitle">总览</h2>
+              <p class="view-subtitle" id="viewSubtitle">把素材、分析和面试结果串成一条清晰、可靠、可回看的工作流。</p>
+            </div>
           </div>
           <div class="topbar-actions">
-            <button class="ghost-btn" id="refreshBtn">刷新数据</button>
+            <button type="button" class="ghost-btn" id="jumpToActiveDocBtn">打开当前文档</button>
+            <button type="button" class="ghost-btn" id="refreshBtn">刷新数据</button>
           </div>
         </header>
 
+        <section class="context-strip">
+          <article class="context-card">
+            <span>当前 Workspace</span>
+            <strong id="contextWorkspace">-</strong>
+            <p id="contextWorkspaceHint">读取 app_config.json 中的默认工作目录。</p>
+          </article>
+          <article class="context-card">
+            <span>默认模型</span>
+            <strong id="contextProvider">-</strong>
+            <p id="contextProviderHint">未检测到供应商配置。</p>
+          </article>
+          <article class="context-card">
+            <span>当前文档</span>
+            <strong id="contextActiveDoc">暂无</strong>
+            <p id="contextActiveDocHint">生成或打开结果后，会在这里保留上下文。</p>
+          </article>
+          <article class="context-card">
+            <span>流程就绪度</span>
+            <strong id="contextReadiness">0 / 4</strong>
+            <p id="contextReadinessHint">建议先把简历和项目素材准备好。</p>
+          </article>
+        </section>
+
         <section class="view active" data-view="dashboard">
-          <div class="hero">
+          <div class="hero hero-dashboard">
             <div class="hero-copy">
-              <p class="eyebrow">MVP READY</p>
-              <h3>先把简历和项目放进素材库，再让每个模块复用。</h3>
-              <p>默认是 Demo 模式，打开就能试交互；填入真实模型参数后，就会走真实大模型调用。</p>
+              <p class="eyebrow">USER-FIRST FLOW</p>
+              <h3>让简历、项目证据、模拟面试与复盘沉淀在一处形成闭环。</h3>
+              <p>这不是一个“功能堆叠页”，而是一套可连续使用的求职工作流。先准备素材，再让每个模块沿用同一份上下文，减少重复输入和上下文断裂。</p>
+              <div class="row-actions hero-actions">
+                <button type="button" class="primary-btn" data-go-view="assets">先导入素材</button>
+                <button type="button" class="ghost-btn" data-go-view="resume-analysis">开始简历分析</button>
+                <button type="button" class="ghost-btn" data-go-view="mock-interview">进入模拟面试</button>
+              </div>
+              <div id="workflowSteps" class="workflow-steps"></div>
             </div>
-            <div class="hero-panels">
-              <article class="metric-card">
-                <span>简历素材</span>
-                <strong id="metricResumes">0</strong>
-              </article>
-              <article class="metric-card">
-                <span>项目素材</span>
-                <strong id="metricProjects">0</strong>
-              </article>
-              <article class="metric-card">
-                <span>结果文档</span>
-                <strong id="metricRuns">0</strong>
-              </article>
-              <article class="metric-card">
-                <span>面试记录</span>
-                <strong id="metricInterviews">0</strong>
-              </article>
-            </div>
+
+            <article class="panel panel-contrast">
+              <div class="panel-head">
+                <h3>下一步建议</h3>
+              </div>
+              <div id="recommendedActions" class="stack"></div>
+              <div class="panel-divider"></div>
+              <div id="dashboardInsights" class="stack compact"></div>
+            </article>
+          </div>
+
+          <div class="metric-strip">
+            <article class="metric-card">
+              <span>简历素材</span>
+              <strong id="metricResumes">0</strong>
+            </article>
+            <article class="metric-card">
+              <span>项目素材</span>
+              <strong id="metricProjects">0</strong>
+            </article>
+            <article class="metric-card">
+              <span>结果文档</span>
+              <strong id="metricRuns">0</strong>
+            </article>
+            <article class="metric-card">
+              <span>面试记录</span>
+              <strong id="metricInterviews">0</strong>
+            </article>
           </div>
 
           <div class="grid two">
@@ -103,8 +156,8 @@
                   <input type="text" name="workspace_path" />
                 </label>
                 <div class="row-actions">
-                  <button type="button" class="ghost-btn" id="applyWorkspaceBtn">&#24212;&#29992;&#24403;&#21069; Workspace</button>
-                  <button type="button" class="ghost-btn" id="clearWorkspaceBtn">&#28165;&#38500;&#35206;&#30422;</button>
+                  <button type="button" class="ghost-btn" id="applyWorkspaceBtn">应用当前 Workspace</button>
+                  <button type="button" class="ghost-btn" id="clearWorkspaceBtn">清除覆盖</button>
                 </div>
                 <input type="hidden" name="provider_id" />
                 <label>
@@ -114,7 +167,7 @@
                 <div class="row-actions">
                   <button type="button" class="ghost-btn" id="newProviderBtn">新建配置</button>
                   <button type="button" class="ghost-btn" id="deleteProviderBtn">删除当前</button>
-                  <button type="button" class="ghost-btn" id="setDefaultProviderBtn">&#35774;&#20026;&#40664;&#35748;</button>
+                  <button type="button" class="ghost-btn" id="setDefaultProviderBtn">设为默认</button>
                 </div>
                 <label>
                   <span>默认供应商</span>
@@ -179,10 +232,10 @@
                 <h3>使用说明</h3>
               </div>
               <div class="markdown-body">
-                <p><strong>Demo 模式</strong>：不需要 API Key，适合先看页面和工作流。</p>
-                <p><strong>OpenAI Compatible</strong>：适合 Codex / OpenAI 兼容接口或其他兼容服务。</p>
-                <p><strong>Anthropic</strong>：适合 Claude API。</p>
-                <p>配置保存后，所有模块都会按这里的参数调用。</p>
+                <p><strong>Demo 模式</strong>：不需要 API Key，适合先确认流程和页面交互。</p>
+                <p><strong>OpenAI Compatible</strong>：适合 Codex / OpenAI 兼容接口，或其他兼容服务。</p>
+                <p><strong>Anthropic</strong>：适合 Claude API 及兼容 Anthropic 的服务。</p>
+                <p>这里保存的是全局模型配置，各个模块会默认复用，减少重复填写。</p>
               </div>
             </article>
           </div>
@@ -234,6 +287,14 @@
                 <button type="submit" class="ghost-btn">按本地路径导入</button>
               </form>
             </article>
+          </div>
+
+          <div class="section-toolbar">
+            <label class="inline-filter search-field">
+              <span>快速搜索素材</span>
+              <input id="assetSearchInput" type="search" placeholder="按名称、文件名或路径搜索简历 / 项目" />
+            </label>
+            <p class="input-hint section-meta" id="assetSearchMeta">显示全部素材。</p>
           </div>
 
           <div class="grid two">
@@ -288,6 +349,7 @@
               <div id="resumeAnalysisResult" class="markdown-shell"></div>
             </article>
           </div>
+
           <div class="grid two">
             <article class="panel">
               <div class="panel-head">
@@ -496,18 +558,25 @@
               <div class="panel-head">
                 <h3>文档列表</h3>
               </div>
-              <label class="inline-filter">
-                <span>模块筛选</span>
-                <select id="historyModuleFilter">
-                  <option value="">全部</option>
-                  <option value="resume_analysis">简历分析</option>
-                  <option value="interview_review">面试评价</option>
-                  <option value="learning">学习总结</option>
-                  <option value="open_source_reading">开源项目阅读</option>
-                  <option value="general_chat">普通对话</option>
-                  <option value="mock_interview">&#27169;&#25311;&#38754;&#35797;</option>
-                </select>
-              </label>
+              <div class="filter-row">
+                <label class="inline-filter">
+                  <span>模块筛选</span>
+                  <select id="historyModuleFilter">
+                    <option value="">全部</option>
+                    <option value="resume_analysis">简历分析</option>
+                    <option value="interview_review">面试评价</option>
+                    <option value="learning">学习总结</option>
+                    <option value="open_source_reading">开源项目阅读</option>
+                    <option value="general_chat">普通对话</option>
+                    <option value="mock_interview">模拟面试</option>
+                  </select>
+                </label>
+                <label class="inline-filter search-field">
+                  <span>关键词</span>
+                  <input id="historySearchInput" type="search" placeholder="按标题、文件名或模块搜索" />
+                </label>
+              </div>
+              <p class="input-hint section-meta" id="historySearchMeta">显示全部记录。</p>
               <div id="historyList" class="stack"></div>
             </article>
 
@@ -526,7 +595,8 @@
       </main>
     </div>
 
-    <div id="toast" class="toast"></div>
+    <div id="navBackdrop" class="nav-backdrop" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="./app.js"></script>
   </body>
 </html>
