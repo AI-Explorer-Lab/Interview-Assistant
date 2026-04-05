@@ -214,6 +214,13 @@ function setElementDisabled(selector, disabled) {
   }
 }
 
+function setOptionalText(selector, value) {
+  const element = qs(selector);
+  if (element) {
+    element.textContent = value;
+  }
+}
+
 function refreshInterviewActionAvailability() {
   const disabled = state.interviewRequestPending || !state.currentInterview || state.currentInterview.status !== "active";
   setElementDisabled('#interviewReplyForm button[type="submit"]', disabled);
@@ -325,14 +332,15 @@ function renderEmpty(target, text) {
   target.innerHTML = `<div class="empty">${text}</div>`;
 }
 
-function renderDoc(target, docState) {
+function renderDoc(target, docState, options = {}) {
   if (!docState.content) {
     renderEmpty(target, "暂无内容");
     return;
   }
   if (docState.mode === "edit") {
-    target.innerHTML = `<textarea id="historyEditor" class="history-editor"></textarea>`;
-    qs("#historyEditor").value = docState.content;
+    const editorId = options.editorId || target.dataset.editorId || "historyEditor";
+    target.innerHTML = `<textarea id="${editorId}" class="history-editor"></textarea>`;
+    qs(`#${editorId}`).value = docState.content;
     return;
   }
   if (docState.mode === "source") {
@@ -343,9 +351,22 @@ function renderDoc(target, docState) {
 }
 
 function renderHistoryDoc() {
+  if (state.resultDocs.history.mode === "edit") {
+    state.resultDocs.history.mode = "source";
+  }
   renderDoc(qs("#historyDocument"), state.resultDocs.history);
-  const saveBtn = qs("#historySaveBtn");
-  saveBtn.disabled = state.resultDocs.history.mode !== "edit" || !state.resultDocs.history.path;
+}
+
+function renderManagedResultDoc(resultKey, containerSelector, saveBtnSelector, editorId, applyBtnSelector = "") {
+  renderDoc(qs(containerSelector), state.resultDocs[resultKey], { editorId });
+  const saveBtn = qs(saveBtnSelector);
+  if (saveBtn) {
+    saveBtn.disabled = state.resultDocs[resultKey].mode !== "edit" || !state.resultDocs[resultKey].path;
+  }
+  const applyBtn = applyBtnSelector ? qs(applyBtnSelector) : null;
+  if (applyBtn) {
+    applyBtn.disabled = state.resultDocs[resultKey].mode !== "edit" || !state.resultDocs[resultKey].path;
+  }
 }
 
 function wireModeButtons(previewSelector, sourceSelector, resultKey, containerSelector) {
@@ -364,6 +385,62 @@ function wireModeButtons(previewSelector, sourceSelector, resultKey, containerSe
       return;
     }
     renderDoc(qs(containerSelector), state.resultDocs[resultKey]);
+  });
+}
+
+async function runButtonWithFeedback(buttonSelector, pendingText, action) {
+  const button = qs(buttonSelector);
+  const originalText = button?.textContent || "";
+  if (button) {
+    button.textContent = pendingText;
+  }
+  try {
+    return await action();
+  } finally {
+    if (button) {
+      button.textContent = originalText;
+    }
+  }
+}
+
+function wireEditableResultButtons(previewSelector, sourceSelector, saveSelector, resultKey, containerSelector, editorId, applyBtnSelector = "", statusSelector = "") {
+  qs(previewSelector).addEventListener("click", () => {
+    state.resultDocs[resultKey].mode = "preview";
+    renderManagedResultDoc(resultKey, containerSelector, saveSelector, editorId, applyBtnSelector);
+  });
+  qs(sourceSelector).addEventListener("click", () => {
+    if (!state.resultDocs[resultKey].path) throw new Error("请先生成一份文档");
+    state.resultDocs[resultKey].mode = "edit";
+    renderManagedResultDoc(resultKey, containerSelector, saveSelector, editorId, applyBtnSelector);
+  });
+  qs(saveSelector).addEventListener("click", async () => {
+    if (!state.resultDocs[resultKey].path) throw new Error("请先生成一份文档");
+    if (state.resultDocs[resultKey].mode !== "edit") throw new Error("请先进入源码编辑模式");
+    const editor = qs(`#${editorId}`);
+    if (!editor) throw new Error("未找到编辑器");
+    if (statusSelector) {
+      setStatus(statusSelector, "正在保存你的修改...");
+    }
+    try {
+      await runButtonWithFeedback(saveSelector, "保存中...", async () => {
+        const result = await api("/api/document", {
+          method: "POST",
+          body: JSON.stringify({ path: state.resultDocs[resultKey].path, content: editor.value }),
+        });
+        state.resultDocs[resultKey] = { path: result.path, content: result.content, mode: "edit" };
+        renderManagedResultDoc(resultKey, containerSelector, saveSelector, editorId, applyBtnSelector);
+        await refreshBootstrap();
+      });
+      if (statusSelector) {
+        setStatus(statusSelector, "修改已保存。");
+      }
+      showToast("修改已保存");
+    } catch (error) {
+      if (statusSelector) {
+        setStatus(statusSelector, `保存失败：${error.message}`, true);
+      }
+      showToast(`保存失败：${error.message}`, true);
+    }
   });
 }
 
@@ -426,7 +503,7 @@ function setBootstrap(bootstrap) {
   ]);
   state.selectedHistoryEntryKeys = state.selectedHistoryEntryKeys.filter((key) => validHistoryKeys.has(key));
   qs("#workspacePath").textContent = bootstrap.workspace_path || "-";
-  qs("#activeDocument").textContent = bootstrap.active_document || "-";
+  setOptionalText("#activeDocument", bootstrap.active_document || "-");
 
   qs("#metricResumes").textContent = `${bootstrap.assets.resumes.length}`;
   qs("#metricProjects").textContent = `${bootstrap.assets.projects.length}`;
@@ -505,7 +582,7 @@ function renderDashboard() {
       const doc = await getDocument(interview.transcript_path);
       state.resultDocs.history = { path: doc.path, content: doc.content, mode: "preview" };
       renderHistoryDoc();
-      qs("#activeDocument").textContent = doc.path;
+      setOptionalText("#activeDocument", doc.path);
       setView("history");
     });
   });
@@ -638,17 +715,16 @@ function fillSelectors() {
   const projects = state.bootstrap.assets.projects;
   const analysisRuns = state.bootstrap.runs.filter((run) => run.module_key === "resume_analysis");
   const reviewRuns = state.bootstrap.runs.filter((run) => run.module_key === "interview_review");
+  const latestReviewRuns = latestReviewRunsByInterview(reviewRuns);
   const providers = state.bootstrap.config.providers || [];
   const defaultProviderId = state.bootstrap.config.default_provider_id || providers[0]?.id || "";
+  const previousResumeId = qs("#resumeAnalysisResume").value;
+  const previousInterviewResumeId = qs("#mockInterviewResume").value;
+  const previousInterviewId = qs("#reviewInterviewSelect").value;
+  const previousLearningReviewId = qs("#learningReviewSelect").value;
   const providerOptions = providers.length
     ? providers.map((provider) => `<option value="${provider.id}">${providerDisplayName(provider)}</option>`).join("")
     : `<option value="">暂无供应商配置</option>`;
-  const currentProviderSelections = Object.fromEntries(
-    ["#resumeAnalysisProvider", "#mockInterviewProvider", "#reviewProvider", "#learningProvider", "#openSourceProvider", "#generalChatProvider"].map((selector) => [
-      selector,
-      qs(selector)?.value || "",
-    ])
-  );
 
   const resumeOptions = resumes.length
     ? resumes.map((asset) => `<option value="${asset.id}">${asset.name}</option>`).join("")
@@ -657,6 +733,12 @@ function fillSelectors() {
   ["#resumeAnalysisResume", "#mockInterviewResume"].forEach((selector) => {
     qs(selector).innerHTML = resumeOptions;
   });
+  if (resumes.some((asset) => asset.id === previousResumeId)) {
+    qs("#resumeAnalysisResume").value = previousResumeId;
+  }
+  if (resumes.some((asset) => asset.id === previousInterviewResumeId)) {
+    qs("#mockInterviewResume").value = previousInterviewResumeId;
+  }
 
   qs("#mockInterviewAnalysis").innerHTML = `<option value="">不引用</option>${analysisRuns
     .map((run) => `<option value="${run.id}">${PathBasename(run.path)}</option>`)
@@ -664,27 +746,99 @@ function fillSelectors() {
   qs("#reviewInterviewSelect").innerHTML = state.bootstrap.interviews.length
     ? state.bootstrap.interviews.map((item) => `<option value="${item.id}">${item.title}</option>`).join("")
     : `<option value="">暂无面试记录</option>`;
-  qs("#learningReviewSelect").innerHTML = reviewRuns.length
-    ? reviewRuns.map((run) => `<option value="${run.id}">${PathBasename(run.path)}</option>`).join("")
+  if (state.bootstrap.interviews.some((item) => item.id === previousInterviewId)) {
+    qs("#reviewInterviewSelect").value = previousInterviewId;
+  }
+  qs("#learningReviewSelect").innerHTML = latestReviewRuns.length
+    ? latestReviewRuns.map((run) => `<option value="${run.id}">${reviewRunLabel(run)}</option>`).join("")
     : `<option value="">暂无面试评价</option>`;
+  if (latestReviewRuns.some((run) => run.id === previousLearningReviewId)) {
+    qs("#learningReviewSelect").value = previousLearningReviewId;
+  }
   qs("#openSourceProject").innerHTML = projects.length
     ? projects.map((project) => `<option value="${project.id}">${project.name}</option>`).join("")
     : `<option value="">暂无项目素材</option>`;
 
   ["#resumeAnalysisProvider", "#mockInterviewProvider", "#reviewProvider", "#learningProvider", "#openSourceProvider", "#generalChatProvider"].forEach((selector) => {
     qs(selector).innerHTML = providerOptions;
-    const preferredId = currentProviderSelections[selector];
-    const exists = providers.some((provider) => provider.id === preferredId);
-    qs(selector).value = exists ? preferredId : defaultProviderId;
+    qs(selector).value = defaultProviderId;
   });
 
   buildProjectChecks(qs("#resumeAnalysisProjects"), projects);
   buildProjectChecks(qs("#mockInterviewProjects"), projects);
-  buildProjectChecks(qs("#learningProjects"), projects);
+  syncLearningProjectChecks();
 }
 
 function PathBasename(path) {
   return path.split(/[\\/]/).pop();
+}
+
+function interviewById(interviewId) {
+  return (state.bootstrap?.interviews || []).find((item) => item.id === interviewId) || null;
+}
+
+function reviewRunLabel(run) {
+  const baseLabel = run.title || PathBasename(run.path || "");
+  const interviewId = run?.source?.interview_id || "";
+  const interview = interviewById(interviewId);
+  return interview ? `${baseLabel}（关联：${interview.title}）` : baseLabel;
+}
+
+function latestReviewRunsByInterview(reviewRuns) {
+  const sorted = [...(reviewRuns || [])].sort(
+    (left, right) => parseDateSafe(right.updated_at || right.created_at) - parseDateSafe(left.updated_at || left.created_at)
+  );
+  const latestByKey = new Map();
+  sorted.forEach((run) => {
+    const interviewId = run?.source?.interview_id || "";
+    const key = interviewId || run.id;
+    if (!latestByKey.has(key)) {
+      latestByKey.set(key, run);
+    }
+  });
+  return Array.from(latestByKey.values()).sort(
+    (left, right) => parseDateSafe(right.updated_at || right.created_at) - parseDateSafe(left.updated_at || left.created_at)
+  );
+}
+
+function latestLearningRunByReview(reviewRunId) {
+  if (!reviewRunId) return null;
+  return (state.bootstrap?.runs || [])
+    .filter((run) => run.module_key === "learning")
+    .filter((run) => (run.source?.review_run_id || "") === reviewRunId)
+    .sort((left, right) => parseDateSafe(right.updated_at || right.created_at) - parseDateSafe(left.updated_at || left.created_at))[0] || null;
+}
+
+function reviewRunById(reviewRunId) {
+  return (state.bootstrap?.runs || []).find((run) => run.id === reviewRunId && run.module_key === "interview_review") || null;
+}
+
+function syncLearningProjectChecks() {
+  const reviewRunId = qs("#learningReviewSelect").value;
+  const learningRun = latestLearningRunByReview(reviewRunId);
+  const reviewRun = reviewRunById(reviewRunId);
+  const selectedIds = learningRun?.source?.project_asset_ids || reviewRun?.source?.project_asset_ids || [];
+  buildProjectChecks(qs("#learningProjects"), state.bootstrap?.assets?.projects || [], selectedIds);
+}
+
+async function loadExistingLearningResult() {
+  const reviewRunId = qs("#learningReviewSelect").value;
+  syncLearningProjectChecks();
+  const existingRun = latestLearningRunByReview(reviewRunId);
+  if (!existingRun) {
+    state.resultDocs.learning = { path: "", content: "", mode: "preview" };
+    renderManagedResultDoc("learning", "#learningResult", "#learningSaveBtn", "learningEditor", "#learningApplyCommentsBtn");
+    if (reviewRunId) {
+      setStatus("#learningStatus", "当前这份面试评价还没有学习总结，可直接点击生成。");
+    } else {
+      setStatus("#learningStatus", "请先选择一份面试评价。");
+    }
+    return;
+  }
+  const doc = await getDocument(existingRun.path);
+  state.resultDocs.learning = { path: doc.path, content: doc.content, mode: "preview" };
+  renderManagedResultDoc("learning", "#learningResult", "#learningSaveBtn", "learningEditor", "#learningApplyCommentsBtn");
+  setStatus("#learningStatus", "已加载这份面试评价对应的学习总结。");
 }
 
 function selectedProjectIds(containerSelector) {
@@ -710,7 +864,7 @@ async function deleteHistoryEntries(entryKeys, confirmMessage, successMessage) {
   if (pathsToDelete.has(state.resultDocs.history.path)) {
     state.resultDocs.history = { path: "", content: "", mode: "preview" };
     renderHistoryDoc();
-    qs("#activeDocument").textContent = "-";
+    setOptionalText("#activeDocument", "-");
   }
   if (deletedRunIds.has(state.generalChatRunId)) {
     state.generalChatRunId = "";
@@ -848,12 +1002,13 @@ async function openHistoryDocument(path) {
   const doc = await getDocument(path);
   state.resultDocs.history = { path: doc.path, content: doc.content, mode: "preview" };
   renderHistoryDoc();
-  qs("#activeDocument").textContent = doc.path;
+  setOptionalText("#activeDocument", doc.path);
 }
 
 async function refreshBootstrap() {
   const bootstrap = await api("/api/bootstrap");
   setBootstrap(bootstrap);
+  await loadExistingLearningResult();
 }
 
 async function fileToText(file) {
@@ -978,7 +1133,7 @@ function latestResumeAnalysisRunId(resumeAssetId) {
 async function loadInterviewMessages(interview) {
   const doc = await getDocument(interview.transcript_path);
   state.resultDocs.history = { path: doc.path, content: doc.content, mode: "preview" };
-  qs("#activeDocument").textContent = doc.path;
+  setOptionalText("#activeDocument", doc.path);
 }
 
 async function syncInterviewAfterStream(interview, messages, finalStatus) {
@@ -1018,6 +1173,18 @@ function setVoiceStatus(message) {
   qs("#voiceStatus").textContent = message;
 }
 
+function refreshVoiceToggleButton() {
+  const button = qs("#voiceToggleBtn");
+  if (!button) return;
+  if (!state.speech.supported) {
+    button.textContent = "\u8bed\u97f3\u4e0d\u53ef\u7528";
+    button.disabled = true;
+    return;
+  }
+  button.disabled = false;
+  button.textContent = state.speech.listening ? "\u505c\u6b62\u5f55\u97f3" : "\u5f00\u59cb\u8bed\u97f3\u8f6c\u6587\u5b57";
+}
+
 function getAnswerTextarea() {
   return qs('#interviewReplyForm textarea[name="answer"]');
 }
@@ -1030,12 +1197,24 @@ function mergeSpeechText(baseText, appendedText) {
   return `${base}\n${extra}`;
 }
 
+function toggleVoiceRecognition() {
+  if (!state.speech.supported || !state.speech.recognition) {
+    throw new Error("\u5f53\u524d\u6d4f\u89c8\u5668\u4e0d\u652f\u6301\u8bed\u97f3\u8bc6\u522b");
+  }
+  if (state.speech.listening) {
+    state.speech.recognition.stop();
+    return;
+  }
+  state.speech.baseText = getAnswerTextarea().value;
+  state.speech.finalText = "";
+  state.speech.recognition.start();
+}
+
 function setupSpeechRecognition() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     setVoiceStatus("当前浏览器不支持原生语音识别，推荐使用最新版 Edge / Chrome。");
-    qs("#startVoiceBtn").disabled = true;
-    qs("#stopVoiceBtn").disabled = true;
+    refreshVoiceToggleButton();
     return;
   }
   const recognition = new SpeechRecognition();
@@ -1044,12 +1223,14 @@ function setupSpeechRecognition() {
   recognition.interimResults = true;
   state.speech.recognition = recognition;
   state.speech.supported = true;
+  refreshVoiceToggleButton();
   setVoiceStatus("点击“开始语音转文字”后，对着麦克风说话，识别结果会自动写入回答框。");
 
   recognition.onstart = () => {
     state.speech.listening = true;
     state.speech.finalText = "";
     state.speech.baseText = getAnswerTextarea().value;
+    refreshVoiceToggleButton();
     setVoiceStatus("正在监听麦克风并转文字...");
   };
 
@@ -1070,11 +1251,13 @@ function setupSpeechRecognition() {
 
   recognition.onerror = (event) => {
     state.speech.listening = false;
+    refreshVoiceToggleButton();
     setVoiceStatus(`语音识别失败：${event.error || "未知错误"}`);
   };
 
   recognition.onend = () => {
     state.speech.listening = false;
+    refreshVoiceToggleButton();
     setVoiceStatus("语音识别已停止。可以继续手动编辑文字，或再次开始录音。");
   };
 }
@@ -1105,40 +1288,32 @@ function bindEvents() {
 
   wireModeButtons("#resumeAnalysisPreviewBtn", "#resumeAnalysisSourceBtn", "resumeAnalysis", "#resumeAnalysisResult");
   wireModeButtons("#reviewPreviewBtn", "#reviewSourceBtn", "review", "#reviewResult");
-  wireModeButtons("#learningPreviewBtn", "#learningSourceBtn", "learning", "#learningResult");
+  wireEditableResultButtons(
+    "#learningPreviewBtn",
+    "#learningSourceBtn",
+    "#learningSaveBtn",
+    "learning",
+    "#learningResult",
+    "learningEditor",
+    "#learningApplyCommentsBtn",
+    "#learningStatus"
+  );
   wireModeButtons("#openSourcePreviewBtn", "#openSourceSourceBtn", "openSource", "#openSourceResult");
   wireModeButtons("#historyPreviewBtn", "#historySourceBtn", "history", "#historyDocument");
-  qs("#historyEditBtn").addEventListener("click", () => {
-    if (!state.resultDocs.history.path) throw new Error("请先打开一份文档");
-    state.resultDocs.history.mode = "edit";
-    renderHistoryDoc();
-  });
-  qs("#historySaveBtn").addEventListener("click", async () => {
-    if (!state.resultDocs.history.path) throw new Error("请先打开一份文档");
-    if (state.resultDocs.history.mode !== "edit") throw new Error("请先进入编辑源码模式");
-    const editor = qs("#historyEditor");
-    if (!editor) throw new Error("未找到编辑器");
-    const result = await api("/api/document", {
-      method: "POST",
-      body: JSON.stringify({ path: state.resultDocs.history.path, content: editor.value }),
-    });
-    state.resultDocs.history = { path: result.path, content: result.content, mode: "source" };
-    renderHistoryDoc();
-    await refreshBootstrap();
-    showToast("文档源码已保存");
+  qs("#learningReviewSelect").addEventListener("change", async () => {
+    await loadExistingLearningResult();
   });
 
-  qs("#startVoiceBtn").addEventListener("click", () => {
-    if (!state.speech.supported || !state.speech.recognition) throw new Error("当前浏览器不支持语音识别");
-    if (state.speech.listening) return;
-    state.speech.baseText = getAnswerTextarea().value;
-    state.speech.finalText = "";
-    state.speech.recognition.start();
+  qs("#voiceToggleBtn").addEventListener("click", () => {
+    toggleVoiceRecognition();
   });
-  qs("#stopVoiceBtn").addEventListener("click", () => {
-    if (!state.speech.supported || !state.speech.recognition) return;
-    if (!state.speech.listening) return;
-    state.speech.recognition.stop();
+
+  getAnswerTextarea().addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+    if (!state.currentInterview || state.interviewRequestPending) return;
+    event.preventDefault();
+    qs("#interviewReplyForm").requestSubmit();
   });
 
   qs("#savedProviderSelect").addEventListener("change", () => {
@@ -1489,7 +1664,7 @@ function bindEvents() {
       const run = await api("/api/run/learning", { method: "POST", body: JSON.stringify(payload) });
       const doc = await getDocument(run.path);
       state.resultDocs.learning = { path: doc.path, content: doc.content, mode: "preview" };
-      renderDoc(qs("#learningResult"), state.resultDocs.learning);
+      renderManagedResultDoc("learning", "#learningResult", "#learningSaveBtn", "learningEditor", "#learningApplyCommentsBtn");
       await refreshBootstrap();
       setStatus("#learningStatus", "学习总结已生成。");
       showToast("学习总结已生成");
@@ -1606,22 +1781,62 @@ function bindEvents() {
     }
   });
 
-  qs("#commentForm").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    if (!state.resultDocs.history.path) throw new Error("请先打开一份文档");
-    const comment = form.comment.value.trim();
-    if (!comment) throw new Error("请输入批注");
-    const result = await api("/api/comment", {
-      method: "POST",
-      body: JSON.stringify({ path: state.resultDocs.history.path, comment }),
-    });
-    state.resultDocs.history = { path: result.path, content: result.content, mode: "preview" };
-    renderHistoryDoc();
-    form.reset();
-    await refreshBootstrap();
-    showToast("批注回复已追加到文档");
+  async function applyInlineComments(
+    resultKey,
+    containerSelector,
+    saveBtnSelector,
+    editorId,
+    applyBtnSelector = "",
+    statusSelector = "",
+    onApplied = null
+  ) {
+    if (!state.resultDocs[resultKey].path) throw new Error("\u8bf7\u5148\u751f\u6210\u6216\u6253\u5f00\u4e00\u4efd\u6587\u6863");
+    if (state.resultDocs[resultKey].mode !== "edit") throw new Error("\u8bf7\u5148\u8fdb\u5165\u6e90\u7801\u7f16\u8f91\u6a21\u5f0f\uff0c\u518d\u76f4\u63a5\u5199\u5165\u6279\u6ce8");
+    const editor = qs(`#${editorId}`);
+    if (!editor) throw new Error("\u672a\u627e\u5230\u7f16\u8f91\u5668");
+    if (statusSelector) {
+      setStatus(statusSelector, "正在根据你写在源码里的批注修改内容...");
+    }
+    try {
+      await runButtonWithFeedback(applyBtnSelector, "修改中...", async () => {
+        const result = await api("/api/document/apply-inline-comments", {
+          method: "POST",
+          body: JSON.stringify({ path: state.resultDocs[resultKey].path, content: editor.value }),
+        });
+        state.resultDocs[resultKey] = { path: result.path, content: result.content, mode: "preview" };
+        if (resultKey === "history") {
+          renderHistoryDoc();
+        } else {
+          renderManagedResultDoc(resultKey, containerSelector, saveBtnSelector, editorId, applyBtnSelector);
+        }
+        await refreshBootstrap();
+      });
+      if (typeof onApplied === "function") {
+        onApplied();
+      } else if (statusSelector) {
+        setStatus(statusSelector, "已根据批注完成修改。");
+      }
+      showToast("\u5df2\u6839\u636e\u6e90\u7801\u4e2d\u7684\u6279\u6ce8\u66f4\u65b0\u6587\u6863");
+    } catch (error) {
+      if (statusSelector) {
+        setStatus(statusSelector, `根据批注修改失败：${error.message}`, true);
+      }
+      showToast(`根据批注修改失败：${error.message}`, true);
+    }
+  }
+
+  qs("#learningApplyCommentsBtn").addEventListener("click", async () => {
+    await applyInlineComments(
+      "learning",
+      "#learningResult",
+      "#learningSaveBtn",
+      "learningEditor",
+      "#learningApplyCommentsBtn",
+      "#learningStatus",
+      () => setStatus("#learningStatus", "\u5df2\u6839\u636e\u6e90\u7801\u91cc\u7684\u6279\u6ce8\u5b8c\u6210\u4fee\u6539\u3002"),
+    );
   });
+
 }
 
 async function init() {
@@ -1632,7 +1847,8 @@ async function init() {
   renderEmpty(qs("#learningResult"), "生成学习总结后会显示在这里。");
   renderEmpty(qs("#openSourceResult"), "生成项目解读后会显示在这里。");
   renderEmpty(qs("#historyDocument"), "从左侧文档列表打开内容。");
-  qs("#historySaveBtn").disabled = true;
+  qs("#learningSaveBtn").disabled = true;
+  qs("#learningApplyCommentsBtn").disabled = true;
   renderInterviewChat([]);
   setInterviewBusy(false);
   interviewShell().addEventListener("scroll", syncInterviewScrollState);

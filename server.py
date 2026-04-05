@@ -107,6 +107,115 @@ def iso_label() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+INTERVIEW_TITLE_RE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})\s+\u6a21\u62df\u9762\u8bd5(?:-(?P<index>\d+))?$")
+RUN_TITLE_LABELS = {
+    "interview_review": "\u9762\u8bd5\u8bc4\u4ef7",
+    "learning": "\u5b66\u4e60\u603b\u7ed3",
+}
+
+
+def extract_iso_date(value: str) -> str:
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", (value or "").strip())
+    return match.group(1) if match else ""
+
+
+def interview_series_date(interview: Dict) -> str:
+    for key in ("created_at", "updated_at"):
+        date_text = extract_iso_date(interview.get(key, ""))
+        if date_text:
+            return date_text
+    title_match = INTERVIEW_TITLE_RE.match((interview.get("title") or "").strip())
+    if title_match:
+        return title_match.group("date")
+    return today_str()
+
+
+def interview_series_base_title(date_text: str) -> str:
+    return f"{date_text} \u6a21\u62df\u9762\u8bd5"
+
+
+def normalize_interview_titles(interviews: List[Dict]) -> bool:
+    grouped: Dict[str, List[Dict]] = {}
+    for interview in interviews or []:
+        grouped.setdefault(interview_series_date(interview), []).append(interview)
+    changed = False
+    for date_text, items in grouped.items():
+        base_title = interview_series_base_title(date_text)
+        items.sort(key=lambda item: (item.get("created_at") or item.get("updated_at") or "", item.get("id") or ""))
+        if len(items) == 1:
+            desired_titles = [base_title]
+        else:
+            desired_titles = [f"{base_title}-{index}" for index in range(1, len(items) + 1)]
+        for interview, desired_title in zip(items, desired_titles):
+            if interview.get("title") != desired_title:
+                interview["title"] = desired_title
+                changed = True
+    return changed
+
+
+def run_series_date(run: Dict, interviews_by_id: Dict[str, Dict]) -> str:
+    source = run.get("source") or {}
+    interview_id = source.get("interview_id") or ""
+    interview = interviews_by_id.get(interview_id)
+    if interview:
+        return interview_series_date(interview)
+    for value in (
+        run.get("created_at", ""),
+        run.get("updated_at", ""),
+        run.get("title", ""),
+        run.get("path", ""),
+    ):
+        date_text = extract_iso_date(value)
+        if date_text:
+            return date_text
+    return today_str()
+
+
+def normalize_run_titles(state: Dict) -> bool:
+    interviews_by_id = {item.get("id", ""): item for item in state.get("interviews", [])}
+    grouped: Dict[Tuple[str, str], List[Dict]] = {}
+    for run in state.get("runs", []):
+        module_key = run.get("module_key") or ""
+        if module_key not in RUN_TITLE_LABELS:
+            continue
+        grouped.setdefault((module_key, run_series_date(run, interviews_by_id)), []).append(run)
+    changed = False
+    for (module_key, date_text), items in grouped.items():
+        base_title = f"{date_text} {RUN_TITLE_LABELS[module_key]}"
+        items.sort(key=lambda item: (item.get("created_at") or item.get("updated_at") or "", item.get("id") or ""))
+        if len(items) == 1:
+            desired_titles = [base_title]
+        else:
+            desired_titles = [f"{base_title}-{index}" for index in range(1, len(items) + 1)]
+        for run, desired_title in zip(items, desired_titles):
+            if run.get("title") != desired_title:
+                run["title"] = desired_title
+                changed = True
+    return changed
+
+
+def interview_transcript_runtime_config(interview: Dict) -> Dict:
+    return {
+        "model": {
+            "provider_label": interview.get("provider_label", ""),
+            "model_name": interview.get("model_name", ""),
+        }
+    }
+
+
+def refresh_interview_transcripts_for_title_changes(state: Dict, previous_titles: Dict[str, str]) -> None:
+    for interview in state.get("interviews", []):
+        if previous_titles.get(interview.get("id", "")) == interview.get("title"):
+            continue
+        data = load_interview_data(interview)
+        if not data:
+            continue
+        persist_markdown(
+            Path(interview["transcript_path"]),
+            interview_transcript_markdown(interview, data, interview_transcript_runtime_config(interview)),
+        )
+
+
 def sanitize_name(name: str) -> str:
     cleaned = re.sub(r'[<>:"/\\\\|?*]+', "-", name or "")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -193,6 +302,16 @@ def resolve_provider(config: Dict, provider_id: Optional[str] = None) -> Dict:
 def runtime_config_with_provider(config: Dict, provider_id: Optional[str] = None) -> Dict:
     runtime = dict(config)
     runtime["model"] = resolve_provider(config, provider_id)
+    return runtime
+
+
+def ensure_runtime_timeout(runtime_config: Dict, minimum_timeout: int) -> Dict:
+    runtime = dict(runtime_config)
+    model_cfg = dict(runtime.get("model") or {})
+    current_timeout = int(model_cfg.get("timeout_seconds") or 0)
+    if current_timeout < minimum_timeout:
+        model_cfg["timeout_seconds"] = minimum_timeout
+    runtime["model"] = model_cfg
     return runtime
 
 
@@ -299,7 +418,15 @@ def with_state(mutator, workspace_override: Optional[str] = None):
         config = load_config()
         workspace = ensure_workspace(config, workspace_override)
         state = load_state(workspace)
+        previous_titles = {item.get("id", ""): item.get("title", "") for item in state.get("interviews", [])}
+        if normalize_interview_titles(state.get("interviews", [])):
+            refresh_interview_transcripts_for_title_changes(state, previous_titles)
+        normalize_run_titles(state)
         result = mutator(workspace, state, config)
+        previous_titles = {item.get("id", ""): item.get("title", "") for item in state.get("interviews", [])}
+        if normalize_interview_titles(state.get("interviews", [])):
+            refresh_interview_transcripts_for_title_changes(state, previous_titles)
+        normalize_run_titles(state)
         save_state(workspace, state)
     return result
 
@@ -653,6 +780,31 @@ def demo_comment_reply(comment: str, document_text: str, config: Dict) -> str:
         "```",
     ]
     return "\n".join(lines)
+
+
+INLINE_COMMENT_RE = re.compile(r"(批注[:：]|TODO[:：]|NOTE[:：]|<!--\s*批注[:：]?|【批注】)", flags=re.IGNORECASE)
+
+
+def has_inline_comment_markers(text: str) -> bool:
+    return bool(INLINE_COMMENT_RE.search(text or ""))
+
+
+def strip_inline_comment_markers(text: str) -> str:
+    normalized = (text or "").replace("\r\n", "\n")
+    normalized = re.sub(r"<!--\s*批注[:：]?\s*.*?-->", "", normalized, flags=re.IGNORECASE)
+    lines = []
+    for line in normalized.split("\n"):
+        if INLINE_COMMENT_RE.search(line):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def demo_inline_comment_apply(original_text: str, annotated_text: str, config: Dict) -> str:
+    cleaned = strip_inline_comment_markers(annotated_text)
+    return (cleaned or original_text or "").strip() + "\n"
 
 
 def demo_general_chat_reply(last_user_text: str, config: Dict) -> str:
@@ -1205,6 +1357,206 @@ def pick_next_project(projects: List[Dict], asked_project_ids: Optional[List[str
     return resolve_focus_project(projects, fallback_project_id)
 
 
+RESUME_TOPIC_SECTION_KEYWORDS = ("项目经历", "项目经验", "工作经历", "工作经验", "实习经历")
+MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def normalize_lookup_key(text: str) -> str:
+    return re.sub(r"[\W_]+", "", (text or "").strip().lower())
+
+
+def clean_resume_topic_title(title: str) -> str:
+    cleaned = re.sub(r"^\d+[\.\-、:：]\s*", "", (title or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def markdown_headings(markdown_text: str) -> Tuple[List[str], List[Dict]]:
+    lines = markdown_text.splitlines()
+    headings = []
+    for index, line in enumerate(lines):
+        match = MARKDOWN_HEADING_RE.match(line.strip())
+        if not match:
+            continue
+        headings.append(
+            {
+                "level": len(match.group(1)),
+                "title": clean_resume_topic_title(match.group(2)),
+                "line": index,
+            }
+        )
+    return lines, headings
+
+
+def match_resume_topic_to_project_asset(topic_name: str, projects: List[Dict]) -> Optional[Dict]:
+    topic_key = normalize_lookup_key(topic_name)
+    if not topic_key:
+        return None
+    best_match = None
+    best_score = 0
+    for project in projects:
+        project_name = (project.get("name") or "").strip()
+        project_key = normalize_lookup_key(project_name)
+        if not project_key:
+            continue
+        score = 0
+        if topic_key == project_key:
+            score = 3
+        elif topic_key in project_key or project_key in topic_key:
+            score = 2
+        elif any(part and normalize_lookup_key(part) in project_key for part in re.split(r"[\s/|,，:：()（）\-]+", topic_name)):
+            score = 1
+        if score > best_score:
+            best_match = project
+            best_score = score
+    return best_match
+
+
+def extract_resume_focus_topics(resume: Dict, projects: List[Dict]) -> List[Dict]:
+    resume_markdown = resume_text_from_asset(resume)
+    lines, headings = markdown_headings(resume_markdown)
+    topics = []
+    for index, heading in enumerate(headings):
+        normalized_title = heading["title"].replace(" ", "")
+        if not any(keyword in normalized_title for keyword in RESUME_TOPIC_SECTION_KEYWORDS):
+            continue
+        section_end = len(lines)
+        for later in headings[index + 1:]:
+            if later["level"] <= heading["level"]:
+                section_end = later["line"]
+                break
+        child_headings = [
+            later
+            for later in headings[index + 1:]
+            if heading["line"] < later["line"] < section_end and later["level"] > heading["level"]
+        ]
+        if not child_headings:
+            continue
+        child_level = min(item["level"] for item in child_headings)
+        direct_children = [item for item in child_headings if item["level"] == child_level]
+        for topic_index, child in enumerate(direct_children):
+            child_end = section_end
+            for later in direct_children[topic_index + 1:]:
+                if later["line"] > child["line"]:
+                    child_end = later["line"]
+                    break
+            topic_content = "\n".join(lines[child["line"]:child_end]).strip()
+            matched_project = match_resume_topic_to_project_asset(child["title"], projects)
+            topics.append(
+                {
+                    "id": f"resume-topic-{len(topics) + 1}",
+                    "name": child["title"],
+                    "section_type": heading["title"],
+                    "content": topic_content,
+                    "matched_project_id": matched_project.get("id", "") if matched_project else "",
+                    "matched_project_name": matched_project.get("name", "") if matched_project else "",
+                }
+            )
+    if topics:
+        return topics
+    for index, project in enumerate(projects):
+        topics.append(
+            {
+                "id": f"project-topic-{index + 1}",
+                "name": project.get("name", f"项目{index + 1}"),
+                "section_type": "项目资料",
+                "content": "",
+                "matched_project_id": project.get("id", ""),
+                "matched_project_name": project.get("name", ""),
+            }
+        )
+    return topics
+
+
+def find_resume_topic_by_id(topics: List[Dict], topic_id: str) -> Optional[Dict]:
+    for topic in topics or []:
+        if topic.get("id") == topic_id:
+            return topic
+    return None
+
+
+def pick_next_resume_topic(topics: List[Dict], asked_topic_ids: Optional[List[str]], fallback_topic_id: str = "") -> Optional[Dict]:
+    asked = {topic_id for topic_id in (asked_topic_ids or []) if topic_id}
+    for topic in topics or []:
+        if topic.get("id") not in asked:
+            return topic
+    return find_resume_topic_by_id(topics, fallback_topic_id) or (topics[0] if topics else None)
+
+
+def matched_project_for_topic(topic: Optional[Dict], projects: List[Dict]) -> Optional[Dict]:
+    if not topic:
+        return None
+    matched_project_id = (topic.get("matched_project_id") or "").strip()
+    return find_project_by_id(projects, matched_project_id) if matched_project_id else None
+
+
+def build_resume_topic_sequence(topics: List[Dict]) -> str:
+    if not topics:
+        return "(none)"
+    return "\n".join(
+        f"{index}. {topic.get('name', '')}（来自 {topic.get('section_type', '简历')}）"
+        for index, topic in enumerate(topics, start=1)
+    )
+
+
+def resume_topic_snapshot_or_placeholder(topic: Optional[Dict]) -> str:
+    if not topic:
+        return "未提供当前简历项目/工作经历片段。"
+    content = (topic.get("content") or "").strip()
+    if len(content) > 2500:
+        content = content[:2500].rstrip() + "\n...[截断]..."
+    lines = [
+        f"主题名称：{topic.get('name', '')}",
+        f"来源章节：{topic.get('section_type', '简历')}",
+    ]
+    if content:
+        lines.extend(["```markdown", content, "```"])
+    else:
+        lines.append("简历中未提取到更详细的原文片段。")
+    return "\n".join(lines)
+
+
+def build_intro_fallback_questions() -> List[str]:
+    return [
+        "请先做一个简短的自我介绍，并重点讲一下你最近这段经历和目标岗位的匹配点。",
+        "你最近在找什么方向的岗位？为什么会重点看大模型应用开发相关机会？",
+        "除了项目本身之外，你觉得自己在技术、工程习惯或沟通协作上，最值得面试官优先了解的点是什么？",
+    ]
+
+
+def user_requests_continue_current_topic(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    keywords = [
+        "继续问这个项目",
+        "继续聊这个项目",
+        "先别换项目",
+        "继续深挖这个项目",
+        "继续问当前项目",
+        "接着问这个项目",
+        "不要切下一个项目",
+        "continue this project",
+        "stay on this project",
+    ]
+    return any(keyword in normalized for keyword in keywords)
+
+
+def build_interview_phase_note(phase: str, topic: Optional[Dict], is_new_topic: bool, asked_topic_ids: Optional[List[str]] = None) -> str:
+    if phase == "intro":
+        return "我们先做个开场，我先了解一下你的基本情况。"
+    if not topic:
+        return ""
+    topic_name = topic.get("name", "当前项目")
+    section_type = topic.get("section_type", "")
+    topic_label = f"你的「{topic_name}」这段经历" if any(keyword in section_type for keyword in ("工作", "实习")) else f"你的「{topic_name}」"
+    if is_new_topic:
+        if asked_topic_ids:
+            return f"接下来我们聊一聊{topic_label}。"
+        return f"接下来我会针对{topic_label}进行提问。"
+    return ""
+
+
 def project_snapshot_or_placeholder(project: Optional[Dict], max_files: int = 10) -> str:
     if not project:
         return "未提供项目资料。"
@@ -1264,6 +1616,13 @@ def extract_question_candidates(text: str) -> List[str]:
 
 
 def build_fallback_project_questions(project: Optional[Dict]) -> List[str]:
+    section_type = (project or {}).get("section_type", "")
+    if any(keyword in section_type for keyword in ("工作", "实习")):
+        return [
+            "先整体讲一下这段经历：你当时负责的业务、模块或角色重点是什么？",
+            "这段经历里你主导或深度参与过的关键技术方案是什么？请讲清具体实现、设计取舍，以及你的实际贡献。",
+            "最后你怎么衡量这段经历的结果或价值？能结合业务指标、交付结果，或者一次真实的问题排查与优化案例来讲吗？",
+        ]
     return [
         "先整体讲一下这个项目：你负责的核心模块是什么，它主要解决了什么业务问题？",
         "这个项目里你做过的关键技术方案是什么？请讲清具体实现、为什么这样设计，以及做过哪些权衡。",
@@ -1271,7 +1630,7 @@ def build_fallback_project_questions(project: Optional[Dict]) -> List[str]:
     ]
 
 
-def normalize_interview_questions(raw_text: str, project: Optional[Dict], other_project_names: Optional[List[str]] = None) -> str:
+def normalize_interview_questions(raw_text: str, project: Optional[Dict], other_project_names: Optional[List[str]] = None, phase: str = "project") -> str:
     project_name = (project or {}).get("name", "")
     blocked_project_names = [name for name in (other_project_names or []) if name]
     candidates = extract_question_candidates(raw_text)
@@ -1293,7 +1652,8 @@ def normalize_interview_questions(raw_text: str, project: Optional[Dict], other_
         if len(normalized_questions) == 3:
             break
     if len(normalized_questions) < 3:
-        for question in build_fallback_project_questions(project):
+        fallback_questions = build_intro_fallback_questions() if phase == "intro" else build_fallback_project_questions(project)
+        for question in fallback_questions:
             signature = re.sub(r"\W+", "", question)
             if signature in seen:
                 continue
@@ -1302,6 +1662,24 @@ def normalize_interview_questions(raw_text: str, project: Optional[Dict], other_
             if len(normalized_questions) == 3:
                 break
     return "\n".join(f"{index}. {question}" for index, question in enumerate(normalized_questions[:3], start=1))
+
+
+def build_interview_turn_message(
+    raw_text: str,
+    phase: str,
+    topic: Optional[Dict],
+    other_topic_names: Optional[List[str]],
+    is_new_topic: bool,
+    asked_topic_ids: Optional[List[str]] = None,
+) -> str:
+    normalized = normalize_interview_questions(
+        raw_text,
+        topic,
+        other_topic_names,
+        phase=phase,
+    )
+    note = build_interview_phase_note(phase, topic, is_new_topic, asked_topic_ids)
+    return f"{note}\n{normalized}".strip() if note else normalized
 
 
 def load_analysis_text_from_run_id(state: Dict, run_id: str) -> str:
@@ -1512,14 +1890,34 @@ def build_interview_review_prompt(interview: Dict, interview_data: Dict, state: 
 
 
 def interview_review_date(interview: Dict) -> str:
-    raw = (interview.get("updated_at") or now_iso()).strip()
-    return raw.split("T", 1)[0] if "T" in raw else raw[:10]
+    for key in ("created_at", "updated_at"):
+        date_text = extract_iso_date(interview.get(key, ""))
+        if date_text:
+            return date_text
+    return today_str()
+
+
+def interview_review_run_title(interview: Dict) -> str:
+    return f"{interview_review_date(interview)} \u9762\u8bd5\u8bc4\u4ef7"
+
+
+def strip_outer_markdown_fence(content: str) -> str:
+    normalized = (content or "").strip()
+    match = re.match(r"^```(?:markdown|md)?\s*\n(?P<body>[\s\S]*?)\n```$", normalized, flags=re.IGNORECASE)
+    return match.group("body").strip() if match else normalized
+
+
+def interview_version_suffix(interview: Dict) -> str:
+    match = INTERVIEW_TITLE_RE.match((interview.get("title") or "").strip())
+    if match and match.group("index"):
+        return f"-{match.group('index')}"
+    return ""
 
 
 def normalize_interview_review_content(interview: Dict, content: str) -> str:
     review_date = interview_review_date(interview)
-    heading = f"# {review_date} 模拟面试结果（大模型应用开发）"
-    normalized = (content or "").strip()
+    heading = f"# {review_date} 模拟面试结果{interview_version_suffix(interview)}（大模型应用开发）"
+    normalized = strip_outer_markdown_fence(content)
     if re.search(r"(?m)^# .+$", normalized):
         normalized = re.sub(r"(?m)^# .+$", heading, normalized, count=1)
     else:
@@ -1528,6 +1926,62 @@ def normalize_interview_review_content(interview: Dict, content: str) -> str:
         normalized = re.sub(r"(?m)^日期[:：].*$", f"日期：{review_date}", normalized, count=1)
     else:
         normalized = normalized.replace(heading, f"{heading}\n\n日期：{review_date}", 1)
+    return normalized.rstrip() + "\n"
+
+
+def learning_summary_date(review_run: Dict, state: Dict) -> str:
+    interview_id = (review_run.get("source") or {}).get("interview_id", "")
+    if interview_id:
+        try:
+            interview = find_interview(state, interview_id)
+            return interview_review_date(interview)
+        except KeyError:
+            pass
+    for key in ("updated_at", "created_at", "title", "path"):
+        date_text = extract_iso_date(review_run.get(key, ""))
+        if date_text:
+            return date_text
+    return today_str()
+
+
+def learning_run_title(review_run: Dict, state: Dict) -> str:
+    return f"{learning_summary_date(review_run, state)} \u5b66\u4e60\u603b\u7ed3"
+
+
+def strip_learning_preamble(content: str) -> str:
+    normalized = (content or "").strip().replace("\r\n", "\n")
+    first_section = re.search(r"(?m)^##\s+", normalized)
+    if first_section:
+        prefix = normalized[:first_section.start()]
+        if re.search(r"你好|收到你的请求|学习助手|我已经仔细阅读|模拟面试结果|面试知识总结", prefix, flags=re.IGNORECASE):
+            normalized = normalized[first_section.start():].lstrip()
+    normalized = re.sub(r"(?im)^你好[！!。,.， ].*$", "", normalized)
+    normalized = re.sub(r"(?im)^.*收到你的请求.*$", "", normalized)
+    normalized = re.sub(r"(?im)^.*我已经仔细阅读.*$", "", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def normalize_learning_content(review_run: Dict, state: Dict, content: str) -> str:
+    summary_date = learning_summary_date(review_run, state)
+    heading = f"# {summary_date} 面试知识总结"
+    normalized = strip_outer_markdown_fence(strip_learning_preamble(content))
+    if re.search(r"(?m)^# .+$", normalized):
+        normalized = re.sub(r"(?m)^# .+$", heading, normalized, count=1)
+    else:
+        normalized = f"{heading}\n\n{normalized}".strip()
+    normalized = re.sub(r"(?m)^日期[:：].*$", "", normalized)
+    normalized = re.sub(r"(?m)^来源面试评价[:：].*$", "", normalized)
+    normalized = re.sub(r"(?m)^关联面试[:：].*$", "", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+    metadata_lines = [f"日期：{summary_date}", f"来源面试评价：{review_run.get('title', '')}"]
+    interview_id = (review_run.get("source") or {}).get("interview_id", "")
+    if interview_id:
+        try:
+            metadata_lines.append(f"关联面试：{find_interview(state, interview_id).get('title', '')}")
+        except KeyError:
+            pass
+    normalized = normalized.replace(heading, heading + "\n\n" + "\n".join(metadata_lines), 1)
     return normalized.rstrip() + "\n"
 
 
@@ -1546,27 +2000,32 @@ def build_interview_system_prompt_v4(skill_text: str, config: Dict) -> str:
 You are conducting a fact-grounded mock interview.
 
 Follow these rules strictly:
-1. Use only the resume text, the current project materials, and statements made by the candidate in the conversation as factual sources.
+1. Use only the resume text, the current resume topic materials, the current project materials, and statements made by the candidate in the conversation as factual sources.
 2. Previous interviewer questions are NOT facts. If an earlier interviewer message conflicts with the resume or project materials, ignore the interviewer message.
 3. If a metric, technology, model, framework, business context, company detail, or implementation detail is not explicitly present in the factual sources, do not invent it. Ask an open-ended question instead.
 4. Ask exactly 3 questions each turn, numbered `1.`, `2.`, `3.`.
-5. In one turn, ask about only one project: the current focus project.
-6. Output questions only. Do not add greetings, explanations, summaries, or evaluation text.
-7. Ask naturally and directly. Do not start every question with repetitive lead-ins like `在《项目名》里` or `关于这个项目`.
+5. If the current stage is `intro`, ask only self-introduction / background questions. Do not start project deep-dives yet.
+6. If the current stage is `topic`, ask only about the current focus topic from the resume. Do not mix in other topics.
+7. Output questions only. Do not add greetings, explanations, summaries, transition sentences, or evaluation text. The server will add transition lines separately.
+8. Ask naturally and directly. Do not start every question with repetitive lead-ins like `在《项目名》里` or `关于这个项目`.
 """
     return build_system_prompt("mock_interview", skill_text, config) + "\n\n" + rules.strip()
 
 
 def build_interview_context_message_v4(
     resume: Dict,
+    current_topic: Optional[Dict],
     current_project: Optional[Dict],
     projects: List[Dict],
+    topics: List[Dict],
     analysis_text: str = "",
-    asked_project_names: Optional[List[str]] = None,
+    asked_topic_names: Optional[List[str]] = None,
+    phase: str = "project",
 ) -> Dict:
     project_names = " / ".join(project["name"] for project in projects) if projects else "(none)"
-    current_project_name = current_project["name"] if current_project else "Current project"
-    asked_text = " / ".join([name for name in (asked_project_names or []) if name]) or "(none)"
+    current_topic_name = current_topic["name"] if current_topic else "(none)"
+    current_project_name = current_project["name"] if current_project else "(none)"
+    asked_text = " / ".join([name for name in (asked_topic_names or []) if name]) or "(none)"
     optional_analysis = ""
     if analysis_text.strip():
         optional_analysis = (
@@ -1575,25 +2034,45 @@ def build_interview_context_message_v4(
             "Do not treat any detail here as fact unless it also appears explicitly in the resume or project materials.\n"
             f"```markdown\n{analysis_text}\n```"
         )
+    if phase == "intro":
+        stage_rules = (
+            "- Current stage: intro\n"
+            "- Ask only self-introduction, job direction, recent experience, and basic background questions.\n"
+            "- Do not enter project deep-dive questions in this turn.\n"
+        )
+    else:
+        stage_rules = (
+            "- Current stage: topic\n"
+            f"- Current focus topic from the resume: {current_topic_name}\n"
+            f"- Matched project asset for extra context: {current_project_name}\n"
+            "- In this turn, only ask about the current focus topic.\n"
+        )
     return {
         "role": "user",
         "content": (
             "Authoritative materials for this interview turn. Treat them as the fact boundary.\n\n"
             "## Fact boundary\n"
-            f"- Allowed project names: {project_names}\n"
-            f"- Current focus project: {current_project_name}\n"
-            f"- Already covered projects: {asked_text}\n"
+            f"{stage_rules}"
+            f"- Resume topics detected from markdown headings:\n{build_resume_topic_sequence(topics)}\n"
+            f"- Allowed project asset names: {project_names}\n"
+            f"- Already covered topics: {asked_text}\n"
             "- If a detail is missing from these materials, do not assume it. Ask openly.\n"
             "- If the candidate asks you to reread the resume, reread the materials below and continue from them.\n"
             "- Candidate messages can add facts about their own experience. Previous interviewer messages cannot create new facts.\n\n"
             f"## Resume\n```markdown\n{resume_text_from_asset(resume)}\n```\n\n"
+            f"## Current resume topic materials\n{resume_topic_snapshot_or_placeholder(current_topic)}\n\n"
             f"## Current project materials\n{project_snapshot_or_placeholder(current_project, max_files=10)}"
             f"{optional_analysis}"
         ),
     }
 
 
-def build_interview_directive_message(conversation_messages: List[Dict], reread_requested: bool = False) -> Dict:
+def build_interview_directive_message(
+    phase: str,
+    current_topic: Optional[Dict],
+    conversation_messages: List[Dict],
+    reread_requested: bool = False,
+) -> Dict:
     if conversation_messages:
         reminder = ""
         if reread_requested:
@@ -1601,18 +2080,35 @@ def build_interview_directive_message(conversation_messages: List[Dict], reread_
                 "\nThe candidate explicitly asked you to reread the resume/project materials. "
                 "Reground yourself in those materials before asking the next three questions."
             )
+        if phase == "intro":
+            task = (
+                "Continue the opening round. Ask only self-introduction and basic background questions. "
+                "Do not start project or work-experience deep dives yet."
+            )
+        else:
+            topic_name = current_topic.get("name", "current topic") if current_topic else "current topic"
+            task = (
+                f"Continue the interview on the resume topic `{topic_name}` only. "
+                "Ask project/work-experience questions only about this topic."
+            )
         return {
             "role": "user",
             "content": (
-                "Continue the mock interview using the factual materials and the conversation history. "
+                f"{task} "
+                "Use the factual materials and the conversation history. "
                 "Only the candidate's messages may add new facts; earlier interviewer questions are continuity only. "
                 "Keep the phrasing natural and avoid repeating the project name at the start of every question."
                 f"{reminder}"
             ),
         }
+    if phase == "intro":
+        content = "Start the first mock interview turn. Ask exactly three self-introduction or basic-background questions."
+    else:
+        topic_name = current_topic.get("name", "current topic") if current_topic else "current topic"
+        content = f"Start the next topic turn. Ask exactly three questions about `{topic_name}` only."
     return {
         "role": "user",
-        "content": "Start the first mock interview turn. Ask exactly three questions about the current focus project, and keep the phrasing natural.",
+        "content": content,
     }
 
 
@@ -1642,26 +2138,33 @@ def generate_interview_questions_v4(
     runtime_config: Dict,
     skill_text: str,
     resume: Dict,
+    current_topic: Optional[Dict],
     current_project: Optional[Dict],
     projects: List[Dict],
+    topics: List[Dict],
     analysis_text: str,
-    asked_project_names: List[str],
+    asked_topic_names: List[str],
     conversation_messages: List[Dict],
+    phase: str = "project",
     reread_requested: bool = False,
 ) -> str:
     provider_cfg = runtime_config.get("model", {})
     if provider_cfg.get("provider_type") == "demo":
-        turn = max(1, len([message for message in conversation_messages if message.get("role") == "assistant"]) + 1)
-        return demo_interview_round_v3(resume, current_project, turn)
+        if phase == "intro":
+            return "\n".join(f"{index}. {question}" for index, question in enumerate(build_intro_fallback_questions(), start=1))
+        return normalize_interview_questions("", current_topic or current_project or {"name": (current_topic or {}).get("name", "")}, [], phase="project")
     system_prompt = build_interview_system_prompt_v4(skill_text, runtime_config)
     context_message = build_interview_context_message_v4(
         resume,
+        current_topic,
         current_project,
         projects,
+        topics,
         analysis_text,
-        asked_project_names,
+        asked_topic_names,
+        phase,
     )
-    directive_message = build_interview_directive_message(conversation_messages, reread_requested)
+    directive_message = build_interview_directive_message(phase, current_topic, conversation_messages, reread_requested)
     return chat_completion_from_messages(
         provider_cfg,
         system_prompt,
@@ -1673,7 +2176,8 @@ def build_learning_prompt(evaluation_text: str, projects: List[Dict], transcript
     return (
         "请根据面试评价中的不足项生成学习总结。"
         "每条不足至少包括：更好的回答、需要学习的知识点、下一步练习建议。"
-        "如果项目中其实已经做过相关内容，但候选人现场没答出来，也请指出更好的表达方式。\n\n"
+        "如果项目中其实已经做过相关内容，但候选人现场没答出来，也请指出更好的表达方式。"
+        "直接输出 Markdown 正文，不要寒暄，不要写“我已经阅读了你的请求/文档”，不要引用其他历史总结标题，也不要自行编造日期。\n\n"
         f"面试评价：\n```markdown\n{evaluation_text}\n```\n\n"
         f"项目资料：\n{project_context}\n\n"
         f"面试记录：\n```markdown\n{transcript_text}\n```"
@@ -1704,9 +2208,61 @@ def build_comment_prompt(module_key: str, document_text: str, comment: str, extr
     )
 
 
+def build_inline_comment_prompt(module_key: str, original_text: str, annotated_text: str, extra_context: str) -> str:
+    return (
+        f"当前文档所属模块：{MODULE_DIRECTORIES.get(module_key, module_key)}。\n"
+        "用户已经直接在文档原文里写入了内联批注，请你根据这些批注直接修改文档正文。\n"
+        "输出要求：\n"
+        "1. 识别内联批注，常见形式包括 `批注：...`、`批注: ...`、`TODO: ...`、`NOTE: ...`、`【批注】...`、`<!-- 批注：... -->`。\n"
+        "2. 按批注修改原文，但尽量保持未涉及部分、标题结构和整体风格不变。\n"
+        "3. 删除所有批注痕迹，不要追加“批注回复”章节，不要解释修改过程。\n"
+        "4. 只输出修改后的完整 Markdown 正文。\n\n"
+        f"原始文档：\n```markdown\n{original_text}\n```\n\n"
+        f"包含内联批注的当前文档：\n```markdown\n{annotated_text}\n```\n\n"
+        f"附加上下文：\n{extra_context}"
+    )
+
+
+def resolve_document_context(state: Dict, target: Path) -> Dict:
+    module_key = "resume_analysis"
+    provider_id = ""
+    extra_context = ""
+    matching_run = next((item for item in state["runs"] if Path(item["path"]) == target), None)
+    if matching_run:
+        module_key = matching_run["module_key"]
+        source = matching_run.get("source", {})
+        provider_id = source.get("provider_id", "")
+        if source.get("resume_asset_id"):
+            resume = find_asset(state, "resume", source["resume_asset_id"])
+            extra_context += f"关联简历：\n```markdown\n{resume_text_from_asset(resume)}\n```\n\n"
+        project_ids = source.get("project_asset_ids", [])
+        if project_ids:
+            extra_context += project_context_from_ids(state, project_ids, max_files=8)
+        if source.get("interview_id"):
+            interview = find_interview(state, source["interview_id"])
+            extra_context += (
+                f"\n\n关联面试记录：\n```markdown\n"
+                f"{Path(interview['transcript_path']).read_text(encoding='utf-8')}\n```"
+            )
+        return {"module_key": module_key, "provider_id": provider_id, "extra_context": extra_context}
+
+    matching_interview = next((item for item in state.get("interviews", []) if Path(item["transcript_path"]) == target), None)
+    if matching_interview:
+        module_key = "mock_interview"
+        provider_id = matching_interview.get("provider_id", "")
+        resume = find_asset(state, "resume", matching_interview["resume_asset_id"])
+        extra_context += f"关联简历：\n```markdown\n{resume_text_from_asset(resume)}\n```\n\n"
+        project_ids = matching_interview.get("project_asset_ids", [])
+        if project_ids:
+            extra_context += project_context_from_ids(state, project_ids, max_files=8)
+        return {"module_key": module_key, "provider_id": provider_id, "extra_context": extra_context}
+
+    return {"module_key": module_key, "provider_id": provider_id, "extra_context": extra_context}
+
+
 
 def start_interview_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
-    runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
+    runtime_config = ensure_runtime_timeout(runtime_config_with_provider(config, payload.get("provider_id")), 180)
     resume = find_asset(state, "resume", payload["resume_asset_id"])
     selected_project_ids = normalize_project_id_list(payload.get("project_asset_ids", []))
     projects = project_assets_from_ids(state, selected_project_ids)
@@ -1722,20 +2278,21 @@ def start_interview_session(workspace: Path, state: Dict, config: Dict, payload:
                 analysis_text = Path(run_item["path"]).read_text(encoding="utf-8")
             break
     skill_text = read_skill("mock_interview")
-    focus_project = pick_next_project(projects, [])
-    asked_project_names: List[str] = []
+    resume_topics = extract_resume_focus_topics(resume, projects)
     opening_raw = generate_interview_questions_v4(
         runtime_config,
         skill_text,
         resume,
-        focus_project,
+        None,
+        None,
         projects,
+        resume_topics,
         analysis_text,
-        asked_project_names,
         [],
+        [],
+        phase="intro",
     )
-    other_project_names = [project["name"] for project in projects if project.get("id") != (focus_project or {}).get("id")]
-    opening = normalize_interview_questions(opening_raw, focus_project, other_project_names)
+    opening = build_interview_turn_message(opening_raw, "intro", None, [topic["name"] for topic in resume_topics], False)
     interview_id = uuid.uuid4().hex
     transcript_path = next_module_markdown_path(workspace, "mock_interview", "\u6a21\u62df\u9762\u8bd5")
     interview_json_path = workspace / "system" / "interviews" / f"{interview_id}.json"
@@ -1745,7 +2302,7 @@ def start_interview_session(workspace: Path, state: Dict, config: Dict, payload:
         "resume_asset_id": resume["id"],
         "resume_name": resume["name"],
         "project_asset_ids": [project["id"] for project in projects],
-        "project_names": [project["name"] for project in projects],
+        "project_names": [topic["name"] for topic in resume_topics] or [project["name"] for project in projects],
         "status": "active",
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -1759,8 +2316,12 @@ def start_interview_session(workspace: Path, state: Dict, config: Dict, payload:
     interview_data = {
         "messages": [{"role": "assistant", "content": opening}],
         "turn_count": 1,
-        "current_project_id": focus_project["id"] if focus_project else "",
-        "asked_project_ids": [focus_project["id"]] if focus_project else [],
+        "phase": "intro",
+        "resume_topics": resume_topics,
+        "current_topic_id": "",
+        "asked_topic_ids": [],
+        "current_project_id": "",
+        "asked_project_ids": [],
     }
     save_interview_data(interview, interview_data)
     persist_markdown(transcript_path, interview_transcript_markdown(interview, interview_data, runtime_config))
@@ -1782,16 +2343,48 @@ def reply_interview_session(workspace: Path, state: Dict, config: Dict, payload:
     asked_project_ids = data.setdefault("asked_project_ids", [])
     projects = project_assets_from_ids(state, interview.get("project_asset_ids", []))
     resume = find_asset(state, "resume", interview["resume_asset_id"])
+    resume_topics = data.get("resume_topics") or extract_resume_focus_topics(resume, projects)
+    data["resume_topics"] = resume_topics
+    phase = data.get("phase") or ("topic" if data.get("current_project_id") or data.get("asked_project_ids") or int(data.get("turn_count", 1)) > 1 else "intro")
+    asked_topic_ids = data.setdefault("asked_topic_ids", [])
+    current_topic_id = data.get("current_topic_id", "")
+    if not current_topic_id and data.get("current_project_id"):
+        matched_topic = next(
+            (topic for topic in resume_topics if topic.get("matched_project_id") == data.get("current_project_id")),
+            None,
+        )
+        if matched_topic:
+            current_topic_id = matched_topic["id"]
+            data["current_topic_id"] = current_topic_id
+    if not asked_topic_ids and asked_project_ids:
+        asked_topic_ids.extend(
+            [
+                topic["id"]
+                for topic in resume_topics
+                if topic.get("matched_project_id") in set(asked_project_ids)
+            ]
+        )
     reread_requested = user_requests_resume_reread(answer)
-    if reread_requested:
-        next_project = resolve_focus_project(projects, data.get("current_project_id", ""))
+    continue_current_topic = user_requests_continue_current_topic(answer)
+    current_topic = find_resume_topic_by_id(resume_topics, current_topic_id)
+    if phase == "intro":
+        next_phase = "topic"
+        next_topic = pick_next_resume_topic(resume_topics, asked_topic_ids, current_topic_id)
+        is_new_topic = True
+    elif reread_requested or continue_current_topic:
+        next_phase = "topic"
+        next_topic = current_topic or pick_next_resume_topic(resume_topics, asked_topic_ids, current_topic_id)
+        is_new_topic = False
     else:
-        next_project = pick_next_project(projects, asked_project_ids, data.get("current_project_id", ""))
+        next_phase = "topic"
+        next_topic = pick_next_resume_topic(resume_topics, asked_topic_ids, current_topic_id) or current_topic
+        is_new_topic = not current_topic or (next_topic and next_topic.get("id") != current_topic.get("id"))
+    next_project = matched_project_for_topic(next_topic, projects)
     analysis_text = load_analysis_text_from_run_id(state, interview.get("analysis_run_id", ""))
-    asked_project_names = [
-        project["name"]
-        for project in projects
-        if project.get("id") in set(asked_project_ids)
+    asked_topic_names = [
+        topic["name"]
+        for topic in resume_topics
+        if topic.get("id") in set(asked_topic_ids)
     ]
     next_turn = int(data.get("turn_count", 1)) + 1
     skill_text = read_skill("mock_interview")
@@ -1799,21 +2392,31 @@ def reply_interview_session(workspace: Path, state: Dict, config: Dict, payload:
         runtime_config,
         skill_text,
         resume,
+        next_topic,
         next_project,
         projects,
+        resume_topics,
         analysis_text,
-        asked_project_names,
+        asked_topic_names,
         data.get("messages", []),
+        phase=next_phase,
         reread_requested=reread_requested,
     )
-    other_project_names = [project["name"] for project in projects if project.get("id") != (next_project or {}).get("id")]
-    reply = normalize_interview_questions(reply_raw, next_project, other_project_names)
+    other_topic_names = [topic["name"] for topic in resume_topics if topic.get("id") != (next_topic or {}).get("id")]
+    reply = build_interview_turn_message(reply_raw, next_phase, next_topic, other_topic_names, is_new_topic, asked_topic_ids)
+    if next_topic:
+        data["current_topic_id"] = next_topic["id"]
+        if is_new_topic and next_topic["id"] not in asked_topic_ids:
+            asked_topic_ids.append(next_topic["id"])
     if next_project:
         data["current_project_id"] = next_project["id"]
-        if next_project["id"] not in asked_project_ids:
+        if is_new_topic and next_project["id"] not in asked_project_ids:
             asked_project_ids.append(next_project["id"])
+    else:
+        data["current_project_id"] = ""
     data["messages"].append({"role": "assistant", "content": reply})
     data["turn_count"] = next_turn
+    data["phase"] = next_phase
     interview["updated_at"] = now_iso()
     save_interview_data(interview, data)
     persist_markdown(Path(interview["transcript_path"]), interview_transcript_markdown(interview, data, runtime_config))
@@ -1823,7 +2426,7 @@ def reply_interview_session(workspace: Path, state: Dict, config: Dict, payload:
 def finish_interview_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
     interview = find_interview(state, payload["interview_id"])
     provider_id = payload.get("provider_id") or interview.get("provider_id")
-    runtime_config = runtime_config_with_provider(config, provider_id)
+    runtime_config = ensure_runtime_timeout(runtime_config_with_provider(config, provider_id), 180)
     data = load_interview_data(interview)
     closing_note = (payload.get("closing_note") or "").strip()
     if closing_note:
@@ -1848,7 +2451,7 @@ def finish_interview_session(workspace: Path, state: Dict, config: Dict, payload
         state,
         runtime_config,
         "interview_review",
-        f"{interview_review_date(interview)} 面试评价",
+        interview_review_run_title(interview),
         content,
         {
             "interview_id": interview["id"],
@@ -1862,7 +2465,7 @@ def finish_interview_session(workspace: Path, state: Dict, config: Dict, payload
 
 
 def rerun_interview_review_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
-    runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
+    runtime_config = ensure_runtime_timeout(runtime_config_with_provider(config, payload.get("provider_id")), 180)
     interview = find_interview(state, payload["interview_id"])
     data = load_interview_data(interview)
     skill_text = read_skill("interview_review")
@@ -1880,7 +2483,7 @@ def rerun_interview_review_session(workspace: Path, state: Dict, config: Dict, p
         state,
         runtime_config,
         "interview_review",
-        f"{interview_review_date(interview)} 面试评价",
+        interview_review_run_title(interview),
         content,
         {
             "interview_id": interview["id"],
@@ -1898,6 +2501,15 @@ def bootstrap_payload(workspace_override: Optional[str] = None) -> Dict:
     config = load_config()
     workspace = ensure_workspace(config, workspace_override)
     state = load_state(workspace)
+    previous_titles = {item.get("id", ""): item.get("title", "") for item in state.get("interviews", [])}
+    changed = False
+    if normalize_interview_titles(state.get("interviews", [])):
+        refresh_interview_transcripts_for_title_changes(state, previous_titles)
+        changed = True
+    if normalize_run_titles(state):
+        changed = True
+    if changed:
+        save_state(workspace, state)
     return {
         "config": config,
         "workspace_path": str(workspace),
@@ -2046,7 +2658,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/chat/respond" and method == "POST":
                 def run_general_chat(workspace, state, config):
-                    runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
+                    runtime_config = ensure_runtime_timeout(runtime_config_with_provider(config, payload.get("provider_id")), 180)
                     messages = payload.get("messages") or []
                     if not messages:
                         raise ValueError("messages 不能为空")
@@ -2300,7 +2912,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 def finish_interview(workspace, state, config):
                     interview = find_interview(state, payload["interview_id"])
                     provider_id = payload.get("provider_id") or interview.get("provider_id")
-                    runtime_config = runtime_config_with_provider(config, provider_id)
+                    runtime_config = ensure_runtime_timeout(runtime_config_with_provider(config, provider_id), 180)
                     data = load_interview_data(interview)
                     closing_note = (payload.get("closing_note") or "").strip()
                     if closing_note:
@@ -2325,7 +2937,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                         state,
                         runtime_config,
                         "interview_review",
-                        "面试评价",
+                        interview_review_run_title(interview),
                         content,
                         {
                             "interview_id": interview["id"],
@@ -2350,7 +2962,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/run/interview-review" and method == "POST":
                 def rerun_review(workspace, state, config):
-                    runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
+                    runtime_config = ensure_runtime_timeout(runtime_config_with_provider(config, payload.get("provider_id")), 180)
                     interview = find_interview(state, payload["interview_id"])
                     data = load_interview_data(interview)
                     skill_text = read_skill("interview_review")
@@ -2368,7 +2980,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                         state,
                         runtime_config,
                         "interview_review",
-                        "面试评价",
+                        interview_review_run_title(interview),
                         content,
                         {
                             "interview_id": interview["id"],
@@ -2386,7 +2998,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/run/learning" and method == "POST":
                 def run_learning(workspace, state, config):
-                    runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
+                    runtime_config = ensure_runtime_timeout(runtime_config_with_provider(config, payload.get("provider_id")), 240)
                     run_item = next((item for item in state["runs"] if item["id"] == payload["review_run_id"]), None)
                     if not run_item:
                         raise KeyError("未找到面试评价文档")
@@ -2407,12 +3019,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                         (evaluation_text, runtime_config),
                         skill_text=skill_text,
                     )
+                    content = normalize_learning_content(run_item, state, content)
                     run = create_run(
                         workspace,
                         state,
                         runtime_config,
                         "learning",
-                        "学习总结",
+                        learning_run_title(run_item, state),
                         content,
                         {
                             "review_run_id": run_item["id"],
@@ -2421,11 +3034,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                         },
                     )
                     knowledge_path = workspace / MODULE_DIRECTORIES["learning"] / "面试知识总结.md"
-                    knowledge_section = (
-                        f"# {today_str()} 面试知识总结\n\n"
-                        f"来源文档：{Path(run['path']).name}\n\n"
-                        f"{content}\n\n---\n"
-                    )
+                    knowledge_section = f"{content.rstrip()}\n\n---\n"
                     with knowledge_path.open("a", encoding="utf-8") as handle:
                         handle.write(knowledge_section)
                     return run
@@ -2512,6 +3121,42 @@ class AppHandler(SimpleHTTPRequestHandler):
                     return {"path": str(target), "content": target.read_text(encoding="utf-8")}
 
                 result = with_state(run_comment, workspace_override)
+                self.send_json({"ok": True, "data": result})
+                return
+            if parsed.path == "/api/document/apply-inline-comments" and method == "POST":
+                def apply_inline_comments(workspace, state, config):
+                    target = Path(payload.get("path") or "")
+                    if not str(target):
+                        raise ValueError("缺少 path")
+                    if not target.exists():
+                        raise FileNotFoundError(f"文件不存在: {target}")
+                    annotated_content = payload.get("content")
+                    if annotated_content is None:
+                        raise ValueError("缺少 content")
+                    if not has_inline_comment_markers(annotated_content):
+                        raise ValueError("未检测到内联批注，请先在源码中写入 `批注：...` 或 `<!-- 批注：... -->`")
+                    original_text = target.read_text(encoding="utf-8")
+                    context = resolve_document_context(state, target)
+                    runtime_config = ensure_runtime_timeout(
+                        runtime_config_with_provider(config, context.get("provider_id") or payload.get("provider_id")),
+                        180,
+                    )
+                    module_key = context.get("module_key", "resume_analysis")
+                    skill_text = read_skill(module_key) if module_key in SKILL_PATHS else ""
+                    revised = call_model(
+                        module_key,
+                        build_inline_comment_prompt(module_key, original_text, annotated_content, context.get("extra_context", "")),
+                        runtime_config,
+                        demo_inline_comment_apply,
+                        (original_text, annotated_content, runtime_config),
+                        skill_text=skill_text if skill_text else None,
+                    )
+                    revised = strip_outer_markdown_fence(revised).rstrip() + "\n"
+                    target.write_text(revised, encoding="utf-8")
+                    state["active_document"] = str(target)
+                    return {"path": str(target), "content": revised}
+
+                result = with_state(apply_inline_comments, workspace_override)
                 self.send_json({"ok": True, "data": result})
                 return
             self.send_error_json("未知 API", status=404)

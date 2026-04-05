@@ -33,10 +33,6 @@
             <span>Workspace</span>
             <strong id="workspacePath">-</strong>
           </div>
-          <div class="status-block">
-            <span>当前文档</span>
-            <strong id="activeDocument">-</strong>
-          </div>
         </div>
       </aside>
 
@@ -346,8 +342,7 @@
               <form id="interviewReplyForm" class="stack">
                 <textarea name="answer" rows="5" placeholder="输入候选人的回答"></textarea>
                 <div class="row-actions">
-                  <button type="button" class="ghost-btn" id="startVoiceBtn">开始语音转文字</button>
-                  <button type="button" class="ghost-btn" id="stopVoiceBtn">停止录音</button>
+                  <button type="button" class="ghost-btn" id="voiceToggleBtn">开始语音转文字</button>
                   <button type="submit" class="primary-btn">发送回答</button>
                   <button type="button" class="ghost-btn" id="endInterviewBtn">结束面试并生成评价</button>
                 </div>
@@ -421,8 +416,11 @@
               <div class="result-toolbar">
                 <button class="ghost-btn" id="learningPreviewBtn">预览</button>
                 <button class="ghost-btn" id="learningSourceBtn">源码</button>
+                <button class="ghost-btn" id="learningSaveBtn">保存修改</button>
+                <button class="ghost-btn" id="learningApplyCommentsBtn">根据批注修改</button>
               </div>
               <div id="learningResult" class="markdown-shell"></div>
+              <p class="input-hint">请先切到源码模式，直接在正文里写入 `批注：...` 或 `<!-- 批注：... -->`，再点击“根据批注修改”。</p>
             </article>
           </div>
         </section>
@@ -515,20 +513,13 @@
 
             <article class="panel">
               <div class="panel-head">
-                <h3>文档查看与批注</h3>
+                <h3>文档查看</h3>
               </div>
               <div class="result-toolbar">
                 <button class="ghost-btn" id="historyPreviewBtn">预览</button>
                 <button class="ghost-btn" id="historySourceBtn">源码</button>
-                <button class="ghost-btn" id="historyEditBtn">编辑源码</button>
-                <button class="ghost-btn" id="historySaveBtn">保存修改</button>
               </div>
               <div id="historyDocument" class="markdown-shell"></div>
-              <p class="input-hint">在“编辑源码”模式下可直接修改文档原文并保存，批注会继续追加到当前文档。</p>
-              <form id="commentForm" class="stack comment-form">
-                <textarea name="comment" rows="4" placeholder="输入批注，例如：批注：这里能否补充更多工程指标？"></textarea>
-                <button type="submit" class="primary-btn">追加批注回复</button>
-              </form>
             </article>
           </div>
         </section>
