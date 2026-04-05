@@ -1226,6 +1226,23 @@ def question_mentions_project(question: str, project_name: str) -> bool:
     return bool(project_name and re.search(re.escape(project_name), question, flags=re.IGNORECASE))
 
 
+def strip_redundant_project_leadin(question: str, project_name: str = "") -> str:
+    cleaned = (question or "").strip()
+    patterns = [
+        r"^(?:在|针对|关于|围绕)\s*[《「“\"]?(?:你的核心项目|当前项目|这个项目|该项目)[》」”\"]?\s*(?:里|中)?\s*[，,：: ]*",
+        r"^(?:先|我们先)?\s*(?:围绕|针对|关于)\s*[《「“\"]?(?:你的核心项目|当前项目|这个项目|该项目)[》」”\"]?\s*[，,：: ]*",
+    ]
+    if project_name:
+        escaped_name = re.escape(project_name)
+        patterns = [
+            rf"^(?:在|针对|关于|围绕)\s*[《「“\"]?{escaped_name}[》」”\"]?\s*(?:里|中)?\s*[，,：: ]*",
+            rf"^(?:在|针对|关于|围绕)\s*项目\s*[《「“\"]?{escaped_name}[》」”\"]?\s*(?:里|中)?\s*[，,：: ]*",
+        ] + patterns
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, count=1, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
 def extract_question_candidates(text: str) -> List[str]:
     normalized = (text or "").replace("\r\n", "\n").strip()
     if not normalized:
@@ -1247,16 +1264,15 @@ def extract_question_candidates(text: str) -> List[str]:
 
 
 def build_fallback_project_questions(project: Optional[Dict]) -> List[str]:
-    project_name = project["name"] if project else "你的核心项目"
     return [
-        f"在《{project_name}》里，你负责的核心模块是什么？这个项目要解决的业务问题是什么？",
-        f"在《{project_name}》里，你做过的关键技术方案是什么？请讲清楚具体组件、库、方法，以及为什么这样设计？",
-        f"《{project_name}》最终是怎么验证效果、稳定性或线上表现的？请给出指标、结果，或一次真实的排查优化案例？",
+        "先整体讲一下这个项目：你负责的核心模块是什么，它主要解决了什么业务问题？",
+        "这个项目里你做过的关键技术方案是什么？请讲清具体实现、为什么这样设计，以及做过哪些权衡。",
+        "最后你是怎么验证这个项目效果、稳定性或线上表现的？能结合指标、结果，或一次真实的排查优化案例来讲吗？",
     ]
 
 
 def normalize_interview_questions(raw_text: str, project: Optional[Dict], other_project_names: Optional[List[str]] = None) -> str:
-    project_name = project["name"] if project else "你的核心项目"
+    project_name = (project or {}).get("name", "")
     blocked_project_names = [name for name in (other_project_names or []) if name]
     candidates = extract_question_candidates(raw_text)
     normalized_questions = []
@@ -1264,11 +1280,9 @@ def normalize_interview_questions(raw_text: str, project: Optional[Dict], other_
     for question in candidates:
         if any(question_mentions_project(question, name) for name in blocked_project_names):
             continue
-        normalized = clean_question_text(question)
+        normalized = strip_redundant_project_leadin(clean_question_text(question), project_name)
         if not normalized:
             continue
-        if project_name and not question_mentions_project(normalized, project_name):
-            normalized = f"在《{project_name}》里，{normalized}"
         if not normalized.endswith(("？", "?")):
             normalized += "？"
         signature = re.sub(r"\W+", "", normalized)
@@ -1526,6 +1540,134 @@ def stream_text_fragments(text: str, chunk_size: int = 16):
         yield content[index:index + chunk_size]
 
 
+
+def build_interview_system_prompt_v4(skill_text: str, config: Dict) -> str:
+    rules = """
+You are conducting a fact-grounded mock interview.
+
+Follow these rules strictly:
+1. Use only the resume text, the current project materials, and statements made by the candidate in the conversation as factual sources.
+2. Previous interviewer questions are NOT facts. If an earlier interviewer message conflicts with the resume or project materials, ignore the interviewer message.
+3. If a metric, technology, model, framework, business context, company detail, or implementation detail is not explicitly present in the factual sources, do not invent it. Ask an open-ended question instead.
+4. Ask exactly 3 questions each turn, numbered `1.`, `2.`, `3.`.
+5. In one turn, ask about only one project: the current focus project.
+6. Output questions only. Do not add greetings, explanations, summaries, or evaluation text.
+7. Ask naturally and directly. Do not start every question with repetitive lead-ins like `在《项目名》里` or `关于这个项目`.
+"""
+    return build_system_prompt("mock_interview", skill_text, config) + "\n\n" + rules.strip()
+
+
+def build_interview_context_message_v4(
+    resume: Dict,
+    current_project: Optional[Dict],
+    projects: List[Dict],
+    analysis_text: str = "",
+    asked_project_names: Optional[List[str]] = None,
+) -> Dict:
+    project_names = " / ".join(project["name"] for project in projects) if projects else "(none)"
+    current_project_name = current_project["name"] if current_project else "Current project"
+    asked_text = " / ".join([name for name in (asked_project_names or []) if name]) or "(none)"
+    optional_analysis = ""
+    if analysis_text.strip():
+        optional_analysis = (
+            "\n\n## Optional follow-up directions (not factual sources)\n"
+            "Use this section only to decide what angle to probe next. "
+            "Do not treat any detail here as fact unless it also appears explicitly in the resume or project materials.\n"
+            f"```markdown\n{analysis_text}\n```"
+        )
+    return {
+        "role": "user",
+        "content": (
+            "Authoritative materials for this interview turn. Treat them as the fact boundary.\n\n"
+            "## Fact boundary\n"
+            f"- Allowed project names: {project_names}\n"
+            f"- Current focus project: {current_project_name}\n"
+            f"- Already covered projects: {asked_text}\n"
+            "- If a detail is missing from these materials, do not assume it. Ask openly.\n"
+            "- If the candidate asks you to reread the resume, reread the materials below and continue from them.\n"
+            "- Candidate messages can add facts about their own experience. Previous interviewer messages cannot create new facts.\n\n"
+            f"## Resume\n```markdown\n{resume_text_from_asset(resume)}\n```\n\n"
+            f"## Current project materials\n{project_snapshot_or_placeholder(current_project, max_files=10)}"
+            f"{optional_analysis}"
+        ),
+    }
+
+
+def build_interview_directive_message(conversation_messages: List[Dict], reread_requested: bool = False) -> Dict:
+    if conversation_messages:
+        reminder = ""
+        if reread_requested:
+            reminder = (
+                "\nThe candidate explicitly asked you to reread the resume/project materials. "
+                "Reground yourself in those materials before asking the next three questions."
+            )
+        return {
+            "role": "user",
+            "content": (
+                "Continue the mock interview using the factual materials and the conversation history. "
+                "Only the candidate's messages may add new facts; earlier interviewer questions are continuity only. "
+                "Keep the phrasing natural and avoid repeating the project name at the start of every question."
+                f"{reminder}"
+            ),
+        }
+    return {
+        "role": "user",
+        "content": "Start the first mock interview turn. Ask exactly three questions about the current focus project, and keep the phrasing natural.",
+    }
+
+
+def user_requests_resume_reread(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    keywords = [
+        "\u91cd\u65b0\u9605\u8bfb\u7b80\u5386",
+        "\u91cd\u65b0\u770b\u7b80\u5386",
+        "\u518d\u770b\u7b80\u5386",
+        "\u91cd\u65b0\u8bfb\u7b80\u5386",
+        "\u518d\u8bfb\u7b80\u5386",
+        "\u770b\u770b\u6211\u7684\u7b80\u5386",
+        "\u56de\u5230\u6211\u7684\u7b80\u5386",
+        "\u91cd\u65b0\u9605\u8bfb\u6211\u7684\u9879\u76ee\u7ecf\u5386",
+        "\u91cd\u65b0\u770b\u6211\u7684\u9879\u76ee\u7ecf\u5386",
+        "\u91cd\u65b0\u8bfb\u4e00\u4e0b\u6211\u7684\u9879\u76ee\u7ecf\u5386",
+        "reread my resume",
+        "read my resume again",
+        "re-read my resume",
+    ]
+    return any(keyword in normalized for keyword in keywords)
+
+
+def generate_interview_questions_v4(
+    runtime_config: Dict,
+    skill_text: str,
+    resume: Dict,
+    current_project: Optional[Dict],
+    projects: List[Dict],
+    analysis_text: str,
+    asked_project_names: List[str],
+    conversation_messages: List[Dict],
+    reread_requested: bool = False,
+) -> str:
+    provider_cfg = runtime_config.get("model", {})
+    if provider_cfg.get("provider_type") == "demo":
+        turn = max(1, len([message for message in conversation_messages if message.get("role") == "assistant"]) + 1)
+        return demo_interview_round_v3(resume, current_project, turn)
+    system_prompt = build_interview_system_prompt_v4(skill_text, runtime_config)
+    context_message = build_interview_context_message_v4(
+        resume,
+        current_project,
+        projects,
+        analysis_text,
+        asked_project_names,
+    )
+    directive_message = build_interview_directive_message(conversation_messages, reread_requested)
+    return chat_completion_from_messages(
+        provider_cfg,
+        system_prompt,
+        [context_message] + list(conversation_messages) + [directive_message],
+    )
+
 def build_learning_prompt(evaluation_text: str, projects: List[Dict], transcript_text: str) -> str:
     project_context = "\n\n".join(build_project_snapshot(project, max_files=10) for project in projects) if projects else "未提供项目资料。"
     return (
@@ -1562,6 +1704,7 @@ def build_comment_prompt(module_key: str, document_text: str, comment: str, extr
     )
 
 
+
 def start_interview_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
     runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
     resume = find_asset(state, "resume", payload["resume_asset_id"])
@@ -1581,28 +1724,24 @@ def start_interview_session(workspace: Path, state: Dict, config: Dict, payload:
     skill_text = read_skill("mock_interview")
     focus_project = pick_next_project(projects, [])
     asked_project_names: List[str] = []
-    prompt = build_interview_round_prompt_v3(
+    opening_raw = generate_interview_questions_v4(
+        runtime_config,
+        skill_text,
         resume,
         focus_project,
+        projects,
         analysis_text,
         asked_project_names,
-    )
-    opening_raw = call_model(
-        "mock_interview",
-        prompt,
-        runtime_config,
-        lambda *args: demo_interview_round_v3(*args),
-        (resume, focus_project, 1),
-        skill_text=skill_text,
+        [],
     )
     other_project_names = [project["name"] for project in projects if project.get("id") != (focus_project or {}).get("id")]
     opening = normalize_interview_questions(opening_raw, focus_project, other_project_names)
     interview_id = uuid.uuid4().hex
-    transcript_path = next_module_markdown_path(workspace, "mock_interview", "模拟面试")
+    transcript_path = next_module_markdown_path(workspace, "mock_interview", "\u6a21\u62df\u9762\u8bd5")
     interview_json_path = workspace / "system" / "interviews" / f"{interview_id}.json"
     interview = {
         "id": interview_id,
-        "title": f"{today_str()} 模拟面试",
+        "title": f"{today_str()} \u6a21\u62df\u9762\u8bd5",
         "resume_asset_id": resume["id"],
         "resume_name": resume["name"],
         "project_asset_ids": [project["id"] for project in projects],
@@ -1634,16 +1773,20 @@ def reply_interview_session(workspace: Path, state: Dict, config: Dict, payload:
     interview = find_interview(state, payload["interview_id"])
     runtime_config = runtime_config_with_provider(config, interview.get("provider_id"))
     if interview["status"] != "active":
-        raise ValueError("当前面试已结束")
+        raise ValueError("\u5f53\u524d\u9762\u8bd5\u5df2\u7ed3\u675f")
     answer = (payload.get("answer") or "").strip()
     if not answer:
-        raise ValueError("回答不能为空")
+        raise ValueError("\u56de\u7b54\u4e0d\u80fd\u4e3a\u7a7a")
     data = load_interview_data(interview)
     data.setdefault("messages", []).append({"role": "user", "content": answer})
     asked_project_ids = data.setdefault("asked_project_ids", [])
     projects = project_assets_from_ids(state, interview.get("project_asset_ids", []))
     resume = find_asset(state, "resume", interview["resume_asset_id"])
-    next_project = pick_next_project(projects, asked_project_ids, data.get("current_project_id", ""))
+    reread_requested = user_requests_resume_reread(answer)
+    if reread_requested:
+        next_project = resolve_focus_project(projects, data.get("current_project_id", ""))
+    else:
+        next_project = pick_next_project(projects, asked_project_ids, data.get("current_project_id", ""))
     analysis_text = load_analysis_text_from_run_id(state, interview.get("analysis_run_id", ""))
     asked_project_names = [
         project["name"]
@@ -1651,24 +1794,18 @@ def reply_interview_session(workspace: Path, state: Dict, config: Dict, payload:
         if project.get("id") in set(asked_project_ids)
     ]
     next_turn = int(data.get("turn_count", 1)) + 1
-    if runtime_config.get("model", {}).get("provider_type") == "demo":
-        reply_raw = demo_interview_round_v3(resume, next_project, next_turn)
-    else:
-        skill_text = read_skill("mock_interview")
-        reply_raw = call_model(
-            "mock_interview",
-            build_interview_round_prompt_v3(
-                resume,
-                next_project,
-                analysis_text,
-                asked_project_names,
-                answer,
-            ),
-            runtime_config,
-            lambda *args: "",
-            tuple(),
-            skill_text=skill_text,
-        )
+    skill_text = read_skill("mock_interview")
+    reply_raw = generate_interview_questions_v4(
+        runtime_config,
+        skill_text,
+        resume,
+        next_project,
+        projects,
+        analysis_text,
+        asked_project_names,
+        data.get("messages", []),
+        reread_requested=reread_requested,
+    )
     other_project_names = [project["name"] for project in projects if project.get("id") != (next_project or {}).get("id")]
     reply = normalize_interview_questions(reply_raw, next_project, other_project_names)
     if next_project:
@@ -1682,7 +1819,6 @@ def reply_interview_session(workspace: Path, state: Dict, config: Dict, payload:
     persist_markdown(Path(interview["transcript_path"]), interview_transcript_markdown(interview, data, runtime_config))
     state["active_document"] = interview["transcript_path"]
     return {"interview": interview, "messages": data["messages"]}
-
 
 def finish_interview_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
     interview = find_interview(state, payload["interview_id"])
@@ -2130,74 +2266,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 except Exception as exc:
                     self.send_stream_event("error", {"error": str(exc)})
                 return
-            if parsed.path == "/api/interview/start" and method == "POST":
-                def start_interview(workspace, state, config):
-                    runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
-                    resume = find_asset(state, "resume", payload["resume_asset_id"])
-                    selected_project_ids = normalize_project_id_list(payload.get("project_asset_ids", []))
-                    projects = project_assets_from_ids(state, selected_project_ids)
-                    analysis_text = ""
-                    source_run = None
-                    if payload.get("analysis_run_id"):
-                        for run_item in state["runs"]:
-                            if run_item["id"] == payload["analysis_run_id"]:
-                                source_project_ids = (run_item.get("source") or {}).get("project_asset_ids", [])
-                                if project_scope_matches(selected_project_ids, source_project_ids):
-                                    source_run = run_item
-                                    analysis_text = Path(run_item["path"]).read_text(encoding="utf-8")
-                                break
-                    skill_text = read_skill("mock_interview")
-                    focus_project = pick_next_project(projects, [])
-                    asked_project_names: List[str] = []
-                    prompt = build_interview_round_prompt_v3(
-                        resume,
-                        focus_project,
-                        analysis_text,
-                        asked_project_names,
-                    )
-                    opening_raw = call_model(
-                        "mock_interview",
-                        prompt,
-                        runtime_config,
-                        lambda *args: demo_interview_round_v3(*args),
-                        (resume, focus_project, 1),
-                        skill_text=skill_text,
-                    )
-                    other_project_names = [project["name"] for project in projects if project.get("id") != (focus_project or {}).get("id")]
-                    opening = normalize_interview_questions(opening_raw, focus_project, other_project_names)
-                    interview_id = uuid.uuid4().hex
-                    transcript_path = next_module_markdown_path(workspace, "mock_interview", "模拟面试")
-                    interview_json_path = workspace / "system" / "interviews" / f"{interview_id}.json"
-                    interview = {
-                        "id": interview_id,
-                        "title": f"{today_str()} 模拟面试",
-                        "resume_asset_id": resume["id"],
-                        "resume_name": resume["name"],
-                        "project_asset_ids": [project["id"] for project in projects],
-                        "project_names": [project["name"] for project in projects],
-                        "status": "active",
-                        "created_at": now_iso(),
-                        "updated_at": now_iso(),
-                        "transcript_path": str(transcript_path),
-                        "json_path": str(interview_json_path),
-                        "analysis_run_id": source_run["id"] if source_run else "",
-                        "provider_id": runtime_config.get("model", {}).get("id", ""),
-                        "provider_label": runtime_config.get("model", {}).get("provider_label", ""),
-                        "model_name": runtime_config.get("model", {}).get("model_name", ""),
-                    }
-                    interview_data = {
-                        "messages": [{"role": "assistant", "content": opening}],
-                        "turn_count": 1,
-                        "current_project_id": focus_project["id"] if focus_project else "",
-                        "asked_project_ids": [focus_project["id"]] if focus_project else [],
-                    }
-                    save_interview_data(interview, interview_data)
-                    persist_markdown(transcript_path, interview_transcript_markdown(interview, interview_data, runtime_config))
-                    state["interviews"].append(interview)
-                    state["active_document"] = str(transcript_path)
-                    return {"interview": interview, "messages": interview_data["messages"]}
 
-                result = with_state(start_interview, workspace_override)
+            if parsed.path == "/api/interview/start" and method == "POST":
+                result = with_state(lambda workspace, state, config: start_interview_session(workspace, state, config, payload), workspace_override)
                 self.send_json({"ok": True, "data": {"interview": normalize_interview(result["interview"]), "messages": result["messages"]}})
                 return
             if parsed.path == "/api/interview/reply-stream" and method == "POST":
@@ -2220,61 +2291,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 except Exception as exc:
                     self.send_stream_event("error", {"error": str(exc)})
                 return
-            if parsed.path == "/api/interview/reply" and method == "POST":
-                def continue_interview(workspace, state, config):
-                    interview = find_interview(state, payload["interview_id"])
-                    runtime_config = runtime_config_with_provider(config, interview.get("provider_id"))
-                    if interview["status"] != "active":
-                        raise ValueError("当前面试已结束")
-                    answer = (payload.get("answer") or "").strip()
-                    if not answer:
-                        raise ValueError("回答不能为空")
-                    data = load_interview_data(interview)
-                    data.setdefault("messages", []).append({"role": "user", "content": answer})
-                    asked_project_ids = data.setdefault("asked_project_ids", [])
-                    projects = project_assets_from_ids(state, interview.get("project_asset_ids", []))
-                    resume = find_asset(state, "resume", interview["resume_asset_id"])
-                    next_project = pick_next_project(projects, asked_project_ids, data.get("current_project_id", ""))
-                    analysis_text = load_analysis_text_from_run_id(state, interview.get("analysis_run_id", ""))
-                    asked_project_names = [
-                        project["name"]
-                        for project in projects
-                        if project.get("id") in set(asked_project_ids)
-                    ]
-                    next_turn = int(data.get("turn_count", 1)) + 1
-                    if runtime_config.get("model", {}).get("provider_type") == "demo":
-                        reply_raw = demo_interview_round_v3(resume, next_project, next_turn)
-                    else:
-                        skill_text = read_skill("mock_interview")
-                        reply_raw = call_model(
-                            "mock_interview",
-                            build_interview_round_prompt_v3(
-                                resume,
-                                next_project,
-                                analysis_text,
-                                asked_project_names,
-                                answer,
-                            ),
-                            runtime_config,
-                            lambda *args: "",
-                            tuple(),
-                            skill_text=skill_text,
-                        )
-                    other_project_names = [project["name"] for project in projects if project.get("id") != (next_project or {}).get("id")]
-                    reply = normalize_interview_questions(reply_raw, next_project, other_project_names)
-                    if next_project:
-                        data["current_project_id"] = next_project["id"]
-                        if next_project["id"] not in asked_project_ids:
-                            asked_project_ids.append(next_project["id"])
-                    data["messages"].append({"role": "assistant", "content": reply})
-                    data["turn_count"] = next_turn
-                    interview["updated_at"] = now_iso()
-                    save_interview_data(interview, data)
-                    persist_markdown(Path(interview["transcript_path"]), interview_transcript_markdown(interview, data, runtime_config))
-                    state["active_document"] = interview["transcript_path"]
-                    return {"interview": interview, "messages": data["messages"]}
 
-                result = with_state(continue_interview, workspace_override)
+            if parsed.path == "/api/interview/reply" and method == "POST":
+                result = with_state(lambda workspace, state, config: reply_interview_session(workspace, state, config, payload), workspace_override)
                 self.send_json({"ok": True, "data": {"interview": normalize_interview(result["interview"]), "messages": result["messages"]}})
                 return
             if parsed.path == "/api/interview/end" and method == "POST":
