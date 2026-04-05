@@ -335,11 +335,14 @@
               </form>
             </article>
 
-            <article class="panel">
+            <article class="panel interview-panel">
               <div class="panel-head">
                 <h3>对话区</h3>
               </div>
-              <div id="interviewChat" class="chat-shell"></div>
+              <div class="interview-chat-frame">
+                <div id="interviewChat" class="chat-shell interview-chat-shell"></div>
+                <button type="button" class="ghost-btn scroll-cue" id="interviewScrollToBottomBtn" hidden>回到底部</button>
+              </div>
               <form id="interviewReplyForm" class="stack">
                 <textarea name="answer" rows="5" placeholder="输入候选人的回答"></textarea>
                 <div class="row-actions">

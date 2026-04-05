@@ -1,6 +1,9 @@
 const state = {
   bootstrap: null,
   currentInterview: null,
+  interviewMessages: [],
+  interviewRequestPending: false,
+  interviewAutoScroll: true,
   generalChatMessages: [],
   generalChatRunId: "",
   workspaceOverride: window.localStorage.getItem("workspaceOverride") || "",
@@ -204,6 +207,25 @@ function setSubmitLoading(formSelector, loading) {
   }
 }
 
+function setElementDisabled(selector, disabled) {
+  const element = qs(selector);
+  if (element) {
+    element.disabled = disabled;
+  }
+}
+
+function refreshInterviewActionAvailability() {
+  const disabled = state.interviewRequestPending || !state.currentInterview || state.currentInterview.status !== "active";
+  setElementDisabled('#interviewReplyForm button[type="submit"]', disabled);
+  setElementDisabled("#endInterviewBtn", disabled);
+}
+
+function setInterviewBusy(loading) {
+  state.interviewRequestPending = loading;
+  setSubmitLoading("#mockInterviewForm", loading);
+  refreshInterviewActionAvailability();
+}
+
 async function api(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
@@ -222,6 +244,54 @@ async function api(path, options = {}) {
     throw new Error(data.error || `请求失败: ${response.status}`);
   }
   return data.data;
+}
+
+async function streamApi(path, options = {}, onEvent) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  const requestUrl = new URL(path, window.location.origin);
+  if (state.workspaceOverride.trim()) {
+    requestUrl.searchParams.set("workspace_override", state.workspaceOverride.trim());
+  }
+  const response = await fetch(`${requestUrl.pathname}${requestUrl.search}`, {
+    headers,
+    ...options,
+  });
+  if (!response.ok) {
+    const fallback = await response.text();
+    try {
+      const parsed = JSON.parse(fallback);
+      throw new Error(parsed.error || `请求失败: ${response.status}`);
+    } catch {
+      throw new Error(fallback || `请求失败: ${response.status}`);
+    }
+  }
+  if (!response.body) {
+    throw new Error("浏览器不支持流式响应");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line) {
+        onEvent(JSON.parse(line));
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+    if (done) break;
+  }
+  const tail = buffer.trim();
+  if (tail) {
+    onEvent(JSON.parse(tail));
+  }
 }
 
 function persistWorkspaceOverride(value) {
@@ -801,23 +871,74 @@ async function fileToBase64(file) {
   return btoa(binary);
 }
 
-function renderInterviewChat(messages) {
-  const shell = qs("#interviewChat");
+function interviewShell() {
+  return qs("#interviewChat");
+}
+
+function isNearBottom(node, threshold = 24) {
+  if (!node) return true;
+  return node.scrollHeight - node.scrollTop - node.clientHeight <= threshold;
+}
+
+function syncInterviewScrollState() {
+  const shell = interviewShell();
+  state.interviewAutoScroll = isNearBottom(shell);
+  const scrollBtn = qs("#interviewScrollToBottomBtn");
+  if (scrollBtn) {
+    scrollBtn.hidden = state.interviewAutoScroll;
+  }
+}
+
+function scrollInterviewToBottom(force = false) {
+  const shell = interviewShell();
+  if (!shell) return;
+  if (force || state.interviewAutoScroll) {
+    shell.scrollTop = shell.scrollHeight;
+  }
+  syncInterviewScrollState();
+}
+
+function setInterviewMessages(messages, options = {}) {
+  state.interviewMessages = (messages || []).map((message) => ({ ...message }));
+  renderInterviewChat(state.interviewMessages, options);
+}
+
+function updateStreamingAssistant(delta) {
+  if (!state.interviewMessages.length) return;
+  const nextMessages = state.interviewMessages.map((message) => ({ ...message }));
+  const lastMessage = nextMessages[nextMessages.length - 1];
+  if (!lastMessage || lastMessage.role !== "assistant") return;
+  lastMessage.content = `${lastMessage.content || ""}${delta || ""}`;
+  lastMessage.pending = false;
+  setInterviewMessages(nextMessages);
+}
+
+function renderInterviewChat(messages, options = {}) {
+  const shell = interviewShell();
+  if (!shell) return;
+  const follow = options.forceScroll || state.interviewAutoScroll || isNearBottom(shell);
   if (!messages || !messages.length) {
     renderEmpty(shell, "启动面试后，对话会显示在这里。");
+    syncInterviewScrollState();
     return;
   }
   shell.innerHTML = messages
-    .map(
-      (message) => `
-        <article class="chat-message ${message.role}">
+    .map((message) => {
+      const placeholder = message.pending && !message.content
+        ? `<div class="markdown-body"><p class="streaming-placeholder">正在生成问题...</p></div>`
+        : markdownToHtml(message.content || "");
+      return `
+        <article class="chat-message ${message.role}${message.pending ? " pending" : ""}">
           <h4>${message.role === "assistant" ? "面试官" : "候选人"}</h4>
-          ${markdownToHtml(message.content)}
+          ${placeholder}
         </article>
-      `
-    )
+      `;
+    })
     .join("");
-  shell.scrollTop = shell.scrollHeight;
+  if (follow) {
+    shell.scrollTop = shell.scrollHeight;
+  }
+  syncInterviewScrollState();
 }
 
 function renderSimpleChat(selector, messages, emptyText, assistantLabel = "AI") {
@@ -858,6 +979,39 @@ async function loadInterviewMessages(interview) {
   const doc = await getDocument(interview.transcript_path);
   state.resultDocs.history = { path: doc.path, content: doc.content, mode: "preview" };
   qs("#activeDocument").textContent = doc.path;
+}
+
+async function syncInterviewAfterStream(interview, messages, finalStatus) {
+  state.currentInterview = interview;
+  refreshInterviewActionAvailability();
+  setInterviewMessages(messages, { forceScroll: false });
+  await loadInterviewMessages(interview);
+  await refreshBootstrap();
+  setStatus("#mockInterviewStatus", finalStatus);
+}
+
+async function runInterviewStream(path, payload) {
+  let finalPayload = null;
+  await streamApi(path, { method: "POST", body: JSON.stringify(payload) }, (event) => {
+    if (event.event === "ack") {
+      return;
+    }
+    if (event.event === "delta") {
+      updateStreamingAssistant(event.delta || "");
+      return;
+    }
+    if (event.event === "complete") {
+      finalPayload = event;
+      return;
+    }
+    if (event.event === "error") {
+      throw new Error(event.error || "流式请求失败");
+    }
+  });
+  if (!finalPayload) {
+    throw new Error("流式响应未返回完成结果");
+  }
+  return finalPayload;
 }
 
 function setVoiceStatus(message) {
@@ -1214,65 +1368,88 @@ function bindEvents() {
 
   qs("#mockInterviewForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (state.interviewRequestPending) return;
     const payload = {
       resume_asset_id: qs("#mockInterviewResume").value,
       project_asset_ids: selectedProjectIds("#mockInterviewProjects"),
       analysis_run_id: qs("#mockInterviewAnalysis").value,
       provider_id: qs("#mockInterviewProvider").value,
     };
-    setSubmitLoading("#mockInterviewForm", true);
+    setInterviewBusy(true);
     setStatus("#mockInterviewStatus", "正在阅读简历与项目资料...");
     try {
-      const result = await api("/api/interview/start", { method: "POST", body: JSON.stringify(payload) });
       setStatus("#mockInterviewStatus", "正在生成首轮问题...");
-      state.currentInterview = result.interview;
-      renderInterviewChat(result.messages);
-      await loadInterviewMessages(result.interview);
-      await refreshBootstrap();
-      setStatus("#mockInterviewStatus", "模拟面试已开始。");
+      state.currentInterview = null;
+      setInterviewMessages([{ role: "assistant", content: "", pending: true }], { forceScroll: true });
+      const result = await runInterviewStream("/api/interview/start-stream", payload);
+      await syncInterviewAfterStream(result.interview, result.messages, "模拟面试已开始。");
       showToast("模拟面试已开始");
     } catch (error) {
+      setInterviewMessages([], { forceScroll: true });
       setStatus("#mockInterviewStatus", `启动失败：${error.message}`, true);
-      throw error;
     } finally {
-      setSubmitLoading("#mockInterviewForm", false);
+      setInterviewBusy(false);
     }
   });
 
   qs("#interviewReplyForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (state.interviewRequestPending) return;
     if (!state.currentInterview) throw new Error("请先启动模拟面试");
     const form = event.currentTarget;
     const answer = form.answer.value.trim();
     if (!answer) throw new Error("请输入回答");
-    setStatus("#mockInterviewStatus", "正在分析你的回答并生成下一轮问题...");
-    const result = await api("/api/interview/reply", {
-      method: "POST",
-      body: JSON.stringify({ interview_id: state.currentInterview.id, answer }),
-    });
-    state.currentInterview = result.interview;
-    renderInterviewChat(result.messages);
+    const previousMessages = state.interviewMessages.map((message) => ({ ...message }));
+    setInterviewMessages(
+      [
+        ...previousMessages,
+        { role: "user", content: answer },
+        { role: "assistant", content: "", pending: true },
+      ],
+      { forceScroll: false }
+    );
     form.reset();
-    await loadInterviewMessages(result.interview);
-    await refreshBootstrap();
-    setStatus("#mockInterviewStatus", "已生成下一轮问题。");
+    setInterviewBusy(true);
+    setStatus("#mockInterviewStatus", "正在分析你的回答并生成下一轮问题...");
+    try {
+      const result = await runInterviewStream("/api/interview/reply-stream", {
+        interview_id: state.currentInterview.id,
+        answer,
+      });
+      await syncInterviewAfterStream(result.interview, result.messages, "已生成下一轮问题。");
+    } catch (error) {
+      form.answer.value = answer;
+      setInterviewMessages(previousMessages);
+      setStatus("#mockInterviewStatus", `发送失败：${error.message}`, true);
+    } finally {
+      setInterviewBusy(false);
+    }
   });
 
   qs("#endInterviewBtn").addEventListener("click", async () => {
+    if (state.interviewRequestPending) return;
     if (!state.currentInterview) throw new Error("当前没有进行中的面试");
+    setInterviewBusy(true);
     setStatus("#mockInterviewStatus", "正在结束面试并生成评价...");
-    const result = await api("/api/interview/end", {
-      method: "POST",
-      body: JSON.stringify({ interview_id: state.currentInterview.id, provider_id: state.currentInterview.provider_id || qs("#mockInterviewProvider").value }),
-    });
-    const doc = await getDocument(result.review_run.path);
-    state.resultDocs.review = { path: doc.path, content: doc.content, mode: "preview" };
-    renderDoc(qs("#reviewResult"), state.resultDocs.review);
-    state.currentInterview = result.interview;
-    await refreshBootstrap();
-    setView("interview-review");
-    setStatus("#mockInterviewStatus", "面试已结束，评价已生成。");
-    showToast("面试已结束，评价已生成");
+    try {
+      const result = await api("/api/interview/end", {
+        method: "POST",
+        body: JSON.stringify({ interview_id: state.currentInterview.id, provider_id: state.currentInterview.provider_id || qs("#mockInterviewProvider").value }),
+      });
+      const doc = await getDocument(result.review_run.path);
+      state.resultDocs.review = { path: doc.path, content: doc.content, mode: "preview" };
+      renderDoc(qs("#reviewResult"), state.resultDocs.review);
+      state.currentInterview = result.interview;
+      refreshInterviewActionAvailability();
+      await refreshBootstrap();
+      setView("interview-review");
+      setStatus("#mockInterviewStatus", "面试已结束，评价已生成。");
+      showToast("面试已结束，评价已生成");
+    } catch (error) {
+      setStatus("#mockInterviewStatus", `结束失败：${error.message}`, true);
+    } finally {
+      setInterviewBusy(false);
+    }
   });
 
   qs("#reviewForm").addEventListener("submit", async (event) => {
@@ -1457,6 +1634,12 @@ async function init() {
   renderEmpty(qs("#historyDocument"), "从左侧文档列表打开内容。");
   qs("#historySaveBtn").disabled = true;
   renderInterviewChat([]);
+  setInterviewBusy(false);
+  interviewShell().addEventListener("scroll", syncInterviewScrollState);
+  qs("#interviewScrollToBottomBtn").addEventListener("click", () => {
+    state.interviewAutoScroll = true;
+    scrollInterviewToBottom(true);
+  });
   renderSimpleChat("#generalChatShell", state.generalChatMessages, "发送消息后，对话会显示在这里。");
   renderSimpleChat("#resumeCoachChat", state.resumeCoachMessages, "在这里和 AI 来回讨论简历修改方案。", "简历优化AI");
 

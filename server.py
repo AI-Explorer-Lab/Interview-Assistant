@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -534,6 +535,35 @@ def demo_interview_opening(resume: Dict, projects: List[Dict], turn: int = 1) ->
         "2. 如果面试官质疑你的项目细节不够可信，你会拿什么证据证明自己真的做过？\n"
         "3. 回到岗位本身，你觉得自己现在距离 offer 还差哪一块？"
     )
+
+
+def demo_interview_opening_v2(resume: Dict, projects: List[Dict], turn: int = 1, focus_project_id: str = "") -> str:
+    focus_project = resolve_focus_project(projects, focus_project_id)
+    focus_project_name = focus_project["name"] if focus_project else "你的核心项目"
+    if turn == 1:
+        return (
+            "我们开始模拟面试，先做一个简短自我介绍，然后只围绕一个项目展开追问。\n\n"
+            "1. 请你用 1 分钟介绍自己，重点说你为什么适合大模型应用开发岗位。\n"
+            f"2. 先聚焦项目《{focus_project_name}》，请你讲清楚这个项目的背景、目标和你的个人职责。\n"
+            f"3. 在《{focus_project_name}》里，你认为最有技术含量的一处设计是什么？为什么这样做？"
+        )
+    if turn == 2:
+        return (
+            f"继续围绕《{focus_project_name}》深挖：\n\n"
+            f"1. 在《{focus_project_name}》的核心链路里，模型、检索、重排和缓存分别是怎么选型的？\n"
+            f"2. 你如何评估《{focus_project_name}》的效果，至少说出一个离线指标和一个线上约束。\n"
+            f"3. 如果《{focus_project_name}》的流量扩大 10 倍，你会优先优化哪两个点？"
+        )
+    return (
+        f"最后继续追问《{focus_project_name}》：\n\n"
+        f"1. 说一个你在《{focus_project_name}》里真实踩过的坑，以及你如何定位和修复。\n"
+        f"2. 如果面试官质疑你对《{focus_project_name}》的细节不够可信，你会拿什么证据证明自己真的做过？\n"
+        f"3. 复盘《{focus_project_name}》，如果再做一次，你最想重构或补强的部分是什么？"
+    )
+
+
+def demo_interview_round_v3(resume: Dict, project: Optional[Dict], round_index: int = 1) -> str:
+    return normalize_interview_questions("", project)
 
 
 def demo_interview_evaluation(interview: Dict, config: Dict) -> str:
@@ -1137,6 +1167,142 @@ def save_interview_data(interview: Dict, data: Dict) -> None:
     json_dump(Path(interview["json_path"]), data)
 
 
+def find_project_by_id(projects: List[Dict], project_id: str) -> Optional[Dict]:
+    for project in projects:
+        if project.get("id") == project_id:
+            return project
+    return None
+
+
+def detect_focus_project_id(projects: List[Dict], text: str) -> str:
+    if not text:
+        return ""
+    matched_ids = []
+    for project in projects:
+        name = (project.get("name") or "").strip()
+        if not name:
+            continue
+        if re.search(re.escape(name), text, flags=re.IGNORECASE):
+            matched_ids.append(project["id"])
+    if len(matched_ids) == 1:
+        return matched_ids[0]
+    return ""
+
+
+def resolve_focus_project(projects: List[Dict], focus_project_id: str = "") -> Optional[Dict]:
+    if focus_project_id:
+        project = find_project_by_id(projects, focus_project_id)
+        if project:
+            return project
+    return projects[0] if projects else None
+
+
+def pick_next_project(projects: List[Dict], asked_project_ids: Optional[List[str]], fallback_project_id: str = "") -> Optional[Dict]:
+    asked = {project_id for project_id in (asked_project_ids or []) if project_id}
+    for project in projects:
+        if project.get("id") not in asked:
+            return project
+    return resolve_focus_project(projects, fallback_project_id)
+
+
+def project_snapshot_or_placeholder(project: Optional[Dict], max_files: int = 10) -> str:
+    if not project:
+        return "未提供项目资料。"
+    return build_project_snapshot(project, max_files=max_files)
+
+
+def clean_question_text(text: str) -> str:
+    cleaned = (text or "").strip()
+    cleaned = cleaned.replace("\r", " ").replace("\n", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.replace("**", "").replace("`", "")
+    cleaned = re.sub(r"^[>\-*•\s]+", "", cleaned)
+    cleaned = re.sub(r"^\d+\.\s*", "", cleaned)
+    cleaned = cleaned.strip(" \t-:：")
+    return cleaned
+
+
+def question_mentions_project(question: str, project_name: str) -> bool:
+    return bool(project_name and re.search(re.escape(project_name), question, flags=re.IGNORECASE))
+
+
+def extract_question_candidates(text: str) -> List[str]:
+    normalized = (text or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        return []
+    pattern = re.compile(
+        r"(?:^|\n)\s*(?:\d+|[一二三四五六七八九十]+|[①②③④⑤⑥⑦⑧⑨⑩])[\.、:：)\]]?\s*(.+?)(?=(?:\n\s*(?:\d+|[一二三四五六七八九十]+|[①②③④⑤⑥⑦⑧⑨⑩])[\.、:：)\]]?\s)|\Z)",
+        flags=re.S,
+    )
+    blocks = [clean_question_text(match) for match in pattern.findall(normalized)]
+    blocks = [block for block in blocks if block]
+    if blocks:
+        return blocks
+    fallback = []
+    for piece in re.split(r"[？?]\s*", normalized):
+        candidate = clean_question_text(piece)
+        if candidate:
+            fallback.append(candidate)
+    return fallback
+
+
+def build_fallback_project_questions(project: Optional[Dict]) -> List[str]:
+    project_name = project["name"] if project else "你的核心项目"
+    return [
+        f"在《{project_name}》里，你负责的核心模块是什么？这个项目要解决的业务问题是什么？",
+        f"在《{project_name}》里，你做过的关键技术方案是什么？请讲清楚具体组件、库、方法，以及为什么这样设计？",
+        f"《{project_name}》最终是怎么验证效果、稳定性或线上表现的？请给出指标、结果，或一次真实的排查优化案例？",
+    ]
+
+
+def normalize_interview_questions(raw_text: str, project: Optional[Dict], other_project_names: Optional[List[str]] = None) -> str:
+    project_name = project["name"] if project else "你的核心项目"
+    blocked_project_names = [name for name in (other_project_names or []) if name]
+    candidates = extract_question_candidates(raw_text)
+    normalized_questions = []
+    seen = set()
+    for question in candidates:
+        if any(question_mentions_project(question, name) for name in blocked_project_names):
+            continue
+        normalized = clean_question_text(question)
+        if not normalized:
+            continue
+        if project_name and not question_mentions_project(normalized, project_name):
+            normalized = f"在《{project_name}》里，{normalized}"
+        if not normalized.endswith(("？", "?")):
+            normalized += "？"
+        signature = re.sub(r"\W+", "", normalized)
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        normalized_questions.append(normalized)
+        if len(normalized_questions) == 3:
+            break
+    if len(normalized_questions) < 3:
+        for question in build_fallback_project_questions(project):
+            signature = re.sub(r"\W+", "", question)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            normalized_questions.append(question)
+            if len(normalized_questions) == 3:
+                break
+    return "\n".join(f"{index}. {question}" for index, question in enumerate(normalized_questions[:3], start=1))
+
+
+def load_analysis_text_from_run_id(state: Dict, run_id: str) -> str:
+    if not run_id:
+        return ""
+    for run_item in state.get("runs", []):
+        if run_item.get("id") != run_id:
+            continue
+        try:
+            return Path(run_item["path"]).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    return ""
+
+
 def interview_transcript_markdown(interview: Dict, data: Dict, config: Dict) -> str:
     resume_name = interview.get("resume_name", "未指定")
     project_names = "、".join(interview.get("project_names", [])) or "未指定"
@@ -1214,6 +1380,106 @@ def build_interview_followup_prompt(interview_data: Dict, latest_answer: str) ->
     )
 
 
+def build_interview_start_prompt_v2(
+    resume: Dict,
+    projects: List[Dict],
+    analysis_text: str = "",
+    focus_project_id: str = "",
+) -> str:
+    project_context = "\n\n".join(build_project_snapshot(project, max_files=10) for project in projects) if projects else "未提供项目资料。"
+    focus_project = resolve_focus_project(projects, focus_project_id)
+    focus_project_name = focus_project["name"] if focus_project else "未指定项目"
+    other_project_names = [project["name"] for project in projects if project.get("id") != (focus_project or {}).get("id")]
+    other_projects_text = "、".join(other_project_names) if other_project_names else "暂无"
+    return (
+        "请开始一场模拟面试。要求：\n"
+        "1. 一次只提出 3 到 5 个问题。\n"
+        "2. 问题必须围绕简历和项目，难度由浅入深。\n"
+        "3. 同一轮里如果问项目，只能围绕同一个项目展开，禁止混入多个项目的问题。\n"
+        f"4. 当前轮次聚焦项目：{focus_project_name}。\n"
+        "5. 即使候选人还有其他项目，本轮也不要切到其他项目；后续轮次再一个项目一个项目地问。\n"
+        "6. 当前轮的每个项目问题都要直接指向当前聚焦项目，避免问题对象模糊。\n"
+        "7. 输出只包含当前轮要问的问题，不要提前给评价。\n\n"
+        "**格式要求（必须严格遵守）**\n"
+        "- 每个问题必须单独一行，以编号开头\n"
+        "- 编号必须是 1. 2. 3. 这样递增格式\n"
+        "- 禁止让所有问题都使用编号 1.\n\n"
+        "正确格式示例：\n"
+        "1. 第一个问题是什么？\n"
+        "2. 第二个问题是什么？\n"
+        "3. 第三个问题是什么？\n\n"
+        f"当前聚焦项目：{focus_project_name}\n"
+        f"其他项目（本轮不要提问）：{other_projects_text}\n\n"
+        f"简历：\n```markdown\n{resume_text_from_asset(resume)}\n```\n\n"
+        f"项目资料：\n{project_context}\n\n"
+        f"已有简历分析（可选）：\n```markdown\n{analysis_text}\n```"
+    )
+
+
+def build_interview_followup_prompt_v2(interview_data: Dict, latest_answer: str, projects: List[Dict]) -> str:
+    transcript = []
+    for message in interview_data.get("messages", []):
+        role = "面试官" if message["role"] == "assistant" else "候选人"
+        transcript.append(f"{role}: {message['content']}")
+    focus_project = resolve_focus_project(projects, interview_data.get("current_project_id", ""))
+    focus_project_name = focus_project["name"] if focus_project else "未指定项目"
+    remaining_names = [project["name"] for project in projects if project.get("id") != (focus_project or {}).get("id")]
+    remaining_projects_text = "、".join(remaining_names) if remaining_names else "暂无"
+    return (
+        "你正在继续一场模拟面试。请基于已有对话和候选人刚才的回答继续追问。"
+        "一次只提出 3 到 5 个问题，继续围绕项目细节、工程指标和取舍展开。"
+        f"当前轮次默认聚焦项目：{focus_project_name}。"
+        "同一轮里如果问项目，只能问这一个项目，不能混入其他项目。"
+        "如果你判断该切到下一个项目，也必须整轮只围绕新的单个项目提问，不能同时提到两个项目。"
+        "除非明确决定切换，否则默认延续当前聚焦项目继续深挖。"
+        "不要给最终评价。\n\n"
+        "**格式要求（必须严格遵守）**\n"
+        "- 每个问题必须单独一行，以编号开头\n"
+        "- 编号必须是 1. 2. 3. 这样递增格式\n"
+        "- 禁止让所有问题都使用编号 1.\n\n"
+        "正确格式示例：\n"
+        "1. 第一个问题是什么？\n"
+        "2. 第二个问题是什么？\n"
+        "3. 第三个问题是什么？\n\n"
+        f"当前聚焦项目：{focus_project_name}\n"
+        f"其他候选项目：{remaining_projects_text}\n\n"
+        f"历史对话：\n```text\n{os.linesep.join(transcript)}\n```\n\n"
+        f"候选人刚才的最新回答：\n{latest_answer}"
+    )
+
+
+def build_interview_round_prompt_v3(
+    resume: Dict,
+    project: Optional[Dict],
+    analysis_text: str = "",
+    asked_project_names: Optional[List[str]] = None,
+    latest_answer: str = "",
+) -> str:
+    project_name = project["name"] if project else "你的核心项目"
+    asked_text = "、".join([name for name in (asked_project_names or []) if name]) or "暂无"
+    latest_answer_block = ""
+    if latest_answer.strip():
+        latest_answer_block = (
+            "上一轮候选人的回答如下。这段内容只用于帮助你了解候选人的表达和经验，不要在本轮继续追问其他项目。\n"
+            f"```text\n{latest_answer.strip()}\n```\n\n"
+        )
+    return (
+        "你正在进行模拟面试。在输出问题前，请先完整阅读候选人的简历，再阅读本轮的当前项目资料。\n"
+        "本轮只允许问一个项目，并且必须严格输出 3 个问题。\n"
+        "3 个问题都必须围绕当前项目，不能掺杂其他项目，不能问自我介绍，不能做评价，不能输出标题或说明文字。\n"
+        f"当前项目：{project_name}\n"
+        f"已经问过的项目：{asked_text}\n"
+        "输出格式必须严格如下，编号必须递增：\n"
+        "1. 第一个问题\n"
+        "2. 第二个问题\n"
+        "3. 第三个问题\n\n"
+        f"{latest_answer_block}"
+        f"简历内容：\n```markdown\n{resume_text_from_asset(resume)}\n```\n\n"
+        f"当前项目资料：\n{project_snapshot_or_placeholder(project, max_files=10)}\n\n"
+        f"补充分析（可选）：\n```markdown\n{analysis_text}\n```"
+    )
+
+
 def build_interview_review_prompt(interview: Dict, interview_data: Dict, state: Dict) -> str:
     transcript = []
     for message in interview_data.get("messages", []):
@@ -1229,6 +1495,35 @@ def build_interview_review_prompt(interview: Dict, interview_data: Dict, state: 
         f"项目上下文：\n{project_context}\n\n"
         f"面试对话：\n```text\n{os.linesep.join(transcript)}\n```"
     )
+
+
+def interview_review_date(interview: Dict) -> str:
+    raw = (interview.get("updated_at") or now_iso()).strip()
+    return raw.split("T", 1)[0] if "T" in raw else raw[:10]
+
+
+def normalize_interview_review_content(interview: Dict, content: str) -> str:
+    review_date = interview_review_date(interview)
+    heading = f"# {review_date} 模拟面试结果（大模型应用开发）"
+    normalized = (content or "").strip()
+    if re.search(r"(?m)^# .+$", normalized):
+        normalized = re.sub(r"(?m)^# .+$", heading, normalized, count=1)
+    else:
+        normalized = f"{heading}\n\n{normalized}".strip()
+    if re.search(r"(?m)^日期[:：].*$", normalized):
+        normalized = re.sub(r"(?m)^日期[:：].*$", f"日期：{review_date}", normalized, count=1)
+    else:
+        normalized = normalized.replace(heading, f"{heading}\n\n日期：{review_date}", 1)
+    return normalized.rstrip() + "\n"
+
+
+def stream_text_fragments(text: str, chunk_size: int = 16):
+    content = text or ""
+    if not content:
+        yield ""
+        return
+    for index in range(0, len(content), chunk_size):
+        yield content[index:index + chunk_size]
 
 
 def build_learning_prompt(evaluation_text: str, projects: List[Dict], transcript_text: str) -> str:
@@ -1265,6 +1560,202 @@ def build_comment_prompt(module_key: str, document_text: str, comment: str, extr
         f"附加上下文：\n{extra_context}\n\n"
         f"批注：{comment}"
     )
+
+
+def start_interview_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
+    runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
+    resume = find_asset(state, "resume", payload["resume_asset_id"])
+    selected_project_ids = normalize_project_id_list(payload.get("project_asset_ids", []))
+    projects = project_assets_from_ids(state, selected_project_ids)
+    analysis_text = ""
+    source_run = None
+    if payload.get("analysis_run_id"):
+        for run_item in state["runs"]:
+            if run_item["id"] != payload["analysis_run_id"]:
+                continue
+            source_project_ids = (run_item.get("source") or {}).get("project_asset_ids", [])
+            if project_scope_matches(selected_project_ids, source_project_ids):
+                source_run = run_item
+                analysis_text = Path(run_item["path"]).read_text(encoding="utf-8")
+            break
+    skill_text = read_skill("mock_interview")
+    focus_project = pick_next_project(projects, [])
+    asked_project_names: List[str] = []
+    prompt = build_interview_round_prompt_v3(
+        resume,
+        focus_project,
+        analysis_text,
+        asked_project_names,
+    )
+    opening_raw = call_model(
+        "mock_interview",
+        prompt,
+        runtime_config,
+        lambda *args: demo_interview_round_v3(*args),
+        (resume, focus_project, 1),
+        skill_text=skill_text,
+    )
+    other_project_names = [project["name"] for project in projects if project.get("id") != (focus_project or {}).get("id")]
+    opening = normalize_interview_questions(opening_raw, focus_project, other_project_names)
+    interview_id = uuid.uuid4().hex
+    transcript_path = next_module_markdown_path(workspace, "mock_interview", "模拟面试")
+    interview_json_path = workspace / "system" / "interviews" / f"{interview_id}.json"
+    interview = {
+        "id": interview_id,
+        "title": f"{today_str()} 模拟面试",
+        "resume_asset_id": resume["id"],
+        "resume_name": resume["name"],
+        "project_asset_ids": [project["id"] for project in projects],
+        "project_names": [project["name"] for project in projects],
+        "status": "active",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "transcript_path": str(transcript_path),
+        "json_path": str(interview_json_path),
+        "analysis_run_id": source_run["id"] if source_run else "",
+        "provider_id": runtime_config.get("model", {}).get("id", ""),
+        "provider_label": runtime_config.get("model", {}).get("provider_label", ""),
+        "model_name": runtime_config.get("model", {}).get("model_name", ""),
+    }
+    interview_data = {
+        "messages": [{"role": "assistant", "content": opening}],
+        "turn_count": 1,
+        "current_project_id": focus_project["id"] if focus_project else "",
+        "asked_project_ids": [focus_project["id"]] if focus_project else [],
+    }
+    save_interview_data(interview, interview_data)
+    persist_markdown(transcript_path, interview_transcript_markdown(interview, interview_data, runtime_config))
+    state["interviews"].append(interview)
+    state["active_document"] = str(transcript_path)
+    return {"interview": interview, "messages": interview_data["messages"]}
+
+
+def reply_interview_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
+    interview = find_interview(state, payload["interview_id"])
+    runtime_config = runtime_config_with_provider(config, interview.get("provider_id"))
+    if interview["status"] != "active":
+        raise ValueError("当前面试已结束")
+    answer = (payload.get("answer") or "").strip()
+    if not answer:
+        raise ValueError("回答不能为空")
+    data = load_interview_data(interview)
+    data.setdefault("messages", []).append({"role": "user", "content": answer})
+    asked_project_ids = data.setdefault("asked_project_ids", [])
+    projects = project_assets_from_ids(state, interview.get("project_asset_ids", []))
+    resume = find_asset(state, "resume", interview["resume_asset_id"])
+    next_project = pick_next_project(projects, asked_project_ids, data.get("current_project_id", ""))
+    analysis_text = load_analysis_text_from_run_id(state, interview.get("analysis_run_id", ""))
+    asked_project_names = [
+        project["name"]
+        for project in projects
+        if project.get("id") in set(asked_project_ids)
+    ]
+    next_turn = int(data.get("turn_count", 1)) + 1
+    if runtime_config.get("model", {}).get("provider_type") == "demo":
+        reply_raw = demo_interview_round_v3(resume, next_project, next_turn)
+    else:
+        skill_text = read_skill("mock_interview")
+        reply_raw = call_model(
+            "mock_interview",
+            build_interview_round_prompt_v3(
+                resume,
+                next_project,
+                analysis_text,
+                asked_project_names,
+                answer,
+            ),
+            runtime_config,
+            lambda *args: "",
+            tuple(),
+            skill_text=skill_text,
+        )
+    other_project_names = [project["name"] for project in projects if project.get("id") != (next_project or {}).get("id")]
+    reply = normalize_interview_questions(reply_raw, next_project, other_project_names)
+    if next_project:
+        data["current_project_id"] = next_project["id"]
+        if next_project["id"] not in asked_project_ids:
+            asked_project_ids.append(next_project["id"])
+    data["messages"].append({"role": "assistant", "content": reply})
+    data["turn_count"] = next_turn
+    interview["updated_at"] = now_iso()
+    save_interview_data(interview, data)
+    persist_markdown(Path(interview["transcript_path"]), interview_transcript_markdown(interview, data, runtime_config))
+    state["active_document"] = interview["transcript_path"]
+    return {"interview": interview, "messages": data["messages"]}
+
+
+def finish_interview_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
+    interview = find_interview(state, payload["interview_id"])
+    provider_id = payload.get("provider_id") or interview.get("provider_id")
+    runtime_config = runtime_config_with_provider(config, provider_id)
+    data = load_interview_data(interview)
+    closing_note = (payload.get("closing_note") or "").strip()
+    if closing_note:
+        data.setdefault("messages", []).append({"role": "user", "content": closing_note})
+    interview["status"] = "completed"
+    interview["updated_at"] = now_iso()
+    save_interview_data(interview, data)
+    persist_markdown(Path(interview["transcript_path"]), interview_transcript_markdown(interview, data, runtime_config))
+    skill_text = read_skill("interview_review")
+    prompt = build_interview_review_prompt(interview, data, state)
+    content = call_model(
+        "interview_review",
+        prompt,
+        runtime_config,
+        demo_interview_evaluation,
+        (interview, runtime_config),
+        skill_text=skill_text,
+    )
+    content = normalize_interview_review_content(interview, content)
+    run = create_run(
+        workspace,
+        state,
+        runtime_config,
+        "interview_review",
+        f"{interview_review_date(interview)} 面试评价",
+        content,
+        {
+            "interview_id": interview["id"],
+            "resume_asset_id": interview["resume_asset_id"],
+            "project_asset_ids": interview.get("project_asset_ids", []),
+            "transcript_path": interview["transcript_path"],
+        },
+    )
+    interview["review_run_id"] = run["id"]
+    return {"interview": interview, "review_run": run}
+
+
+def rerun_interview_review_session(workspace: Path, state: Dict, config: Dict, payload: Dict) -> Dict:
+    runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
+    interview = find_interview(state, payload["interview_id"])
+    data = load_interview_data(interview)
+    skill_text = read_skill("interview_review")
+    content = call_model(
+        "interview_review",
+        build_interview_review_prompt(interview, data, state),
+        runtime_config,
+        demo_interview_evaluation,
+        (interview, runtime_config),
+        skill_text=skill_text,
+    )
+    content = normalize_interview_review_content(interview, content)
+    run = create_run(
+        workspace,
+        state,
+        runtime_config,
+        "interview_review",
+        f"{interview_review_date(interview)} 面试评价",
+        content,
+        {
+            "interview_id": interview["id"],
+            "resume_asset_id": interview["resume_asset_id"],
+            "project_asset_ids": interview.get("project_asset_ids", []),
+            "transcript_path": interview["transcript_path"],
+        },
+    )
+    interview["review_run_id"] = run["id"]
+    interview["updated_at"] = now_iso()
+    return run
 
 
 def bootstrap_payload(workspace_override: Optional[str] = None) -> Dict:
@@ -1344,6 +1835,18 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def send_error_json(self, message: str, status: int = 400):
         self.send_json({"ok": False, "error": message}, status=status)
+
+    def begin_stream(self, status: int = 200):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+    def send_stream_event(self, event: str, payload: Optional[Dict] = None):
+        body = {"event": event, **(payload or {})}
+        chunk = (json.dumps(body, ensure_ascii=False) + "\n").encode("utf-8")
+        self.wfile.write(chunk)
+        self.wfile.flush()
 
     def workspace_override_from_request(self, parsed=None, payload: Optional[Dict] = None) -> Optional[str]:
         header_value = (self.headers.get("X-Workspace-Path", "") or "").strip()
@@ -1607,6 +2110,26 @@ class AppHandler(SimpleHTTPRequestHandler):
                 run = with_state(run_resume, workspace_override)
                 self.send_json({"ok": True, "data": normalize_run_item(run)})
                 return
+            if parsed.path == "/api/interview/start-stream" and method == "POST":
+                self.begin_stream()
+                self.send_stream_event("ack", {"status": "starting"})
+                try:
+                    result = with_state(lambda workspace, state, config: start_interview_session(workspace, state, config, payload), workspace_override)
+                    assistant_text = (result["messages"][-1].get("content", "") if result.get("messages") else "")
+                    for fragment in stream_text_fragments(assistant_text):
+                        if fragment:
+                            self.send_stream_event("delta", {"delta": fragment})
+                            time.sleep(0.012)
+                    self.send_stream_event(
+                        "complete",
+                        {
+                            "interview": normalize_interview(result["interview"]),
+                            "messages": result["messages"],
+                        },
+                    )
+                except Exception as exc:
+                    self.send_stream_event("error", {"error": str(exc)})
+                return
             if parsed.path == "/api/interview/start" and method == "POST":
                 def start_interview(workspace, state, config):
                     runtime_config = runtime_config_with_provider(config, payload.get("provider_id"))
@@ -1624,15 +2147,24 @@ class AppHandler(SimpleHTTPRequestHandler):
                                     analysis_text = Path(run_item["path"]).read_text(encoding="utf-8")
                                 break
                     skill_text = read_skill("mock_interview")
-                    prompt = build_interview_start_prompt(resume, projects, analysis_text)
-                    opening = call_model(
+                    focus_project = pick_next_project(projects, [])
+                    asked_project_names: List[str] = []
+                    prompt = build_interview_round_prompt_v3(
+                        resume,
+                        focus_project,
+                        analysis_text,
+                        asked_project_names,
+                    )
+                    opening_raw = call_model(
                         "mock_interview",
                         prompt,
                         runtime_config,
-                        lambda *args: demo_interview_opening(*args),
-                        (resume, projects, 1),
+                        lambda *args: demo_interview_round_v3(*args),
+                        (resume, focus_project, 1),
                         skill_text=skill_text,
                     )
+                    other_project_names = [project["name"] for project in projects if project.get("id") != (focus_project or {}).get("id")]
+                    opening = normalize_interview_questions(opening_raw, focus_project, other_project_names)
                     interview_id = uuid.uuid4().hex
                     transcript_path = next_module_markdown_path(workspace, "mock_interview", "模拟面试")
                     interview_json_path = workspace / "system" / "interviews" / f"{interview_id}.json"
@@ -1656,6 +2188,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                     interview_data = {
                         "messages": [{"role": "assistant", "content": opening}],
                         "turn_count": 1,
+                        "current_project_id": focus_project["id"] if focus_project else "",
+                        "asked_project_ids": [focus_project["id"]] if focus_project else [],
                     }
                     save_interview_data(interview, interview_data)
                     persist_markdown(transcript_path, interview_transcript_markdown(interview, interview_data, runtime_config))
@@ -1665,6 +2199,26 @@ class AppHandler(SimpleHTTPRequestHandler):
 
                 result = with_state(start_interview, workspace_override)
                 self.send_json({"ok": True, "data": {"interview": normalize_interview(result["interview"]), "messages": result["messages"]}})
+                return
+            if parsed.path == "/api/interview/reply-stream" and method == "POST":
+                self.begin_stream()
+                self.send_stream_event("ack", {"status": "replying"})
+                try:
+                    result = with_state(lambda workspace, state, config: reply_interview_session(workspace, state, config, payload), workspace_override)
+                    assistant_text = (result["messages"][-1].get("content", "") if result.get("messages") else "")
+                    for fragment in stream_text_fragments(assistant_text):
+                        if fragment:
+                            self.send_stream_event("delta", {"delta": fragment})
+                            time.sleep(0.012)
+                    self.send_stream_event(
+                        "complete",
+                        {
+                            "interview": normalize_interview(result["interview"]),
+                            "messages": result["messages"],
+                        },
+                    )
+                except Exception as exc:
+                    self.send_stream_event("error", {"error": str(exc)})
                 return
             if parsed.path == "/api/interview/reply" and method == "POST":
                 def continue_interview(workspace, state, config):
@@ -1677,23 +2231,41 @@ class AppHandler(SimpleHTTPRequestHandler):
                         raise ValueError("回答不能为空")
                     data = load_interview_data(interview)
                     data.setdefault("messages", []).append({"role": "user", "content": answer})
+                    asked_project_ids = data.setdefault("asked_project_ids", [])
+                    projects = project_assets_from_ids(state, interview.get("project_asset_ids", []))
+                    resume = find_asset(state, "resume", interview["resume_asset_id"])
+                    next_project = pick_next_project(projects, asked_project_ids, data.get("current_project_id", ""))
+                    analysis_text = load_analysis_text_from_run_id(state, interview.get("analysis_run_id", ""))
+                    asked_project_names = [
+                        project["name"]
+                        for project in projects
+                        if project.get("id") in set(asked_project_ids)
+                    ]
                     next_turn = int(data.get("turn_count", 1)) + 1
                     if runtime_config.get("model", {}).get("provider_type") == "demo":
-                        reply = demo_interview_opening(
-                            find_asset(state, "resume", interview["resume_asset_id"]),
-                            project_assets_from_ids(state, interview.get("project_asset_ids", [])),
-                            min(next_turn, 3),
-                        )
+                        reply_raw = demo_interview_round_v3(resume, next_project, next_turn)
                     else:
                         skill_text = read_skill("mock_interview")
-                        reply = call_model(
+                        reply_raw = call_model(
                             "mock_interview",
-                            build_interview_followup_prompt(data, answer),
+                            build_interview_round_prompt_v3(
+                                resume,
+                                next_project,
+                                analysis_text,
+                                asked_project_names,
+                                answer,
+                            ),
                             runtime_config,
                             lambda *args: "",
                             tuple(),
                             skill_text=skill_text,
                         )
+                    other_project_names = [project["name"] for project in projects if project.get("id") != (next_project or {}).get("id")]
+                    reply = normalize_interview_questions(reply_raw, next_project, other_project_names)
+                    if next_project:
+                        data["current_project_id"] = next_project["id"]
+                        if next_project["id"] not in asked_project_ids:
+                            asked_project_ids.append(next_project["id"])
                     data["messages"].append({"role": "assistant", "content": reply})
                     data["turn_count"] = next_turn
                     interview["updated_at"] = now_iso()
@@ -1728,6 +2300,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                         (interview, runtime_config),
                         skill_text=skill_text,
                     )
+                    content = normalize_interview_review_content(interview, content)
                     run = create_run(
                         workspace,
                         state,
@@ -1770,6 +2343,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                         (interview, runtime_config),
                         skill_text=skill_text,
                     )
+                    content = normalize_interview_review_content(interview, content)
                     run = create_run(
                         workspace,
                         state,
