@@ -1,3 +1,79 @@
+const UI_PREF_STORAGE_KEY = "interviewAssistant.ui.v2";
+
+function normalizeIdList(list) {
+  return Array.from(
+    new Set(
+      (Array.isArray(list) ? list : [])
+        .filter((value) => typeof value === "string" && value.trim())
+        .map((value) => value.trim())
+    )
+  );
+}
+
+function defaultUiPreferences() {
+  return {
+    lastView: "dashboard",
+    assetSearch: "",
+    historySearch: "",
+    forms: {
+      resumeAnalysis: { resumeId: "", providerId: "", projectIds: [] },
+      mockInterview: { resumeId: "", providerId: "", projectIds: [], analysisRunId: "" },
+      review: { interviewId: "", providerId: "" },
+      learning: { reviewRunId: "", providerId: "", projectIds: [] },
+      openSource: { projectId: "", providerId: "" },
+      generalChat: { providerId: "" },
+    },
+  };
+}
+
+function sanitizeUiPreferences(raw = {}) {
+  const defaults = defaultUiPreferences();
+  const forms = raw.forms || {};
+  return {
+    lastView: typeof raw.lastView === "string" ? raw.lastView : defaults.lastView,
+    assetSearch: typeof raw.assetSearch === "string" ? raw.assetSearch : defaults.assetSearch,
+    historySearch: typeof raw.historySearch === "string" ? raw.historySearch : defaults.historySearch,
+    forms: {
+      resumeAnalysis: {
+        ...defaults.forms.resumeAnalysis,
+        ...(forms.resumeAnalysis || {}),
+        projectIds: normalizeIdList(forms.resumeAnalysis?.projectIds),
+      },
+      mockInterview: {
+        ...defaults.forms.mockInterview,
+        ...(forms.mockInterview || {}),
+        projectIds: normalizeIdList(forms.mockInterview?.projectIds),
+      },
+      review: {
+        ...defaults.forms.review,
+        ...(forms.review || {}),
+      },
+      learning: {
+        ...defaults.forms.learning,
+        ...(forms.learning || {}),
+        projectIds: normalizeIdList(forms.learning?.projectIds),
+      },
+      openSource: {
+        ...defaults.forms.openSource,
+        ...(forms.openSource || {}),
+      },
+      generalChat: {
+        ...defaults.forms.generalChat,
+        ...(forms.generalChat || {}),
+      },
+    },
+  };
+}
+
+function loadUiPreferences() {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(UI_PREF_STORAGE_KEY) || "{}");
+    return sanitizeUiPreferences(raw);
+  } catch {
+    return defaultUiPreferences();
+  }
+}
+
 const state = {
   bootstrap: null,
   currentInterview: null,
@@ -9,6 +85,11 @@ const state = {
   workspaceOverride: window.localStorage.getItem("workspaceOverride") || "",
   selectedHistoryEntryKeys: [],
   resumeCoachMessages: [],
+  ui: {
+    currentView: "dashboard",
+    sidebarOpen: false,
+    preferences: loadUiPreferences(),
+  },
   speech: {
     recognition: null,
     supported: false,
@@ -50,6 +131,23 @@ function blankProvider(overrides = {}) {
   };
 }
 
+function persistUiPreferences() {
+  try {
+    window.localStorage.setItem(UI_PREF_STORAGE_KEY, JSON.stringify(state.ui.preferences));
+  } catch {}
+}
+
+function updateFormPreference(formKey, patch) {
+  state.ui.preferences.forms[formKey] = {
+    ...state.ui.preferences.forms[formKey],
+    ...patch,
+  };
+  if ("projectIds" in patch) {
+    state.ui.preferences.forms[formKey].projectIds = normalizeIdList(patch.projectIds);
+  }
+  persistUiPreferences();
+}
+
 function providerDisplayName(provider) {
   const label = provider.provider_label || "未命名供应商";
   const rawModelName = (provider.model_name || "").trim();
@@ -60,16 +158,47 @@ function providerDisplayName(provider) {
   return `${label}${model}${type}`;
 }
 
-const viewTitles = {
-  dashboard: "总览",
-  config: "模型配置",
-  assets: "素材库",
-  "resume-analysis": "简历分析",
-  "mock-interview": "模拟面试",
-  "interview-review": "面试评价",
-  learning: "学习总结",
-  "open-source": "开源项目阅读",
-  history: "历史记录",
+const viewMeta = {
+  dashboard: {
+    title: "总览",
+    subtitle: "把素材、分析和面试结果串成一条清晰、可靠、可回看的工作流。",
+  },
+  config: {
+    title: "模型配置",
+    subtitle: "统一维护模型供应商和 Workspace，让后续所有模块直接复用。",
+  },
+  assets: {
+    title: "素材库",
+    subtitle: "先把简历和项目证据整理好，后续各模块都会基于这里的素材工作。",
+  },
+  "resume-analysis": {
+    title: "简历分析",
+    subtitle: "围绕候选人简历与项目证据做一轮结构化分析，后续可继续互动迭代。",
+  },
+  "mock-interview": {
+    title: "模拟面试",
+    subtitle: "复用简历、项目和分析结果，进入持续追问式的面试训练。",
+  },
+  "interview-review": {
+    title: "面试评价",
+    subtitle: "把面试过程转成结构化反馈，方便定位强项、短板和补强方向。",
+  },
+  learning: {
+    title: "学习总结",
+    subtitle: "把评价结果沉淀成可复用的知识总结，减少下一次重复踩坑。",
+  },
+  "open-source": {
+    title: "开源项目阅读",
+    subtitle: "围绕选定项目生成结构化解读，帮助你快速建立项目讲解素材。",
+  },
+  "general-chat": {
+    title: "普通对话",
+    subtitle: "处理非模块化问题、补充提问或临时讨论，保持上下文仍然在同一工作台里。",
+  },
+  history: {
+    title: "历史记录",
+    subtitle: "集中查看所有结果文档与面试记录，支持批量管理和快速回看。",
+  },
 };
 
 function qs(selector) {
@@ -80,7 +209,59 @@ function qsa(selector) {
   return Array.from(document.querySelectorAll(selector));
 }
 
-viewTitles["general-chat"] = "普通对话";
+function normalizeSearch(value) {
+  return (value || "").trim().toLowerCase();
+}
+
+function matchesSearch(text, query) {
+  return !query || (text || "").toLowerCase().includes(query);
+}
+
+function selectHasOption(select, value) {
+  return Array.from(select?.options || []).some((option) => option.value === value);
+}
+
+function applySelectValue(selector, candidates) {
+  const select = qs(selector);
+  if (!select) return "";
+  for (const candidate of candidates) {
+    const normalized = typeof candidate === "string" ? candidate : `${candidate || ""}`;
+    if (selectHasOption(select, normalized)) {
+      select.value = normalized;
+      return normalized;
+    }
+  }
+  if (select.options.length) {
+    select.value = select.options[0].value;
+    return select.value;
+  }
+  return "";
+}
+
+function sameIdSet(left, right) {
+  const leftIds = normalizeIdList(left);
+  const rightIds = normalizeIdList(right);
+  if (leftIds.length !== rightIds.length) return false;
+  const rightSet = new Set(rightIds);
+  return leftIds.every((value) => rightSet.has(value));
+}
+
+function resolveInitialView() {
+  const hashView = window.location.hash.replace(/^#/, "");
+  if (viewMeta[hashView]) return hashView;
+  const preferredView = state.ui.preferences.lastView;
+  if (viewMeta[preferredView]) return preferredView;
+  return "dashboard";
+}
+
+function toggleSidebar(open) {
+  state.ui.sidebarOpen = open;
+  document.body.classList.toggle("sidebar-open", open);
+  const backdrop = qs("#navBackdrop");
+  if (backdrop) {
+    backdrop.hidden = !open;
+  }
+}
 
 function escapeHtml(value) {
   return value
@@ -314,18 +495,35 @@ function globalWorkspacePath() {
   return (state.bootstrap?.config?.workspace_path || "").trim();
 }
 
-async function getDocument(path) {
-  return api(`/api/document?path=${encodeURIComponent(path)}`);
+async function getDocument(path, options = {}) {
+  const params = new URLSearchParams({ path });
+  if (options.activate) {
+    params.set("activate", "1");
+  }
+  return api(`/api/document?${params.toString()}`);
 }
 
 function setView(viewKey) {
+  const meta = viewMeta[viewKey] || viewMeta.dashboard;
   qsa(".nav-item").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === viewKey);
   });
   qsa(".view").forEach((view) => {
     view.classList.toggle("active", view.dataset.view === viewKey);
   });
-  qs("#viewTitle").textContent = viewTitles[viewKey] || "Interview-Assistant";
+  state.ui.currentView = viewKey;
+  state.ui.preferences.lastView = viewKey;
+  persistUiPreferences();
+  qs("#viewTitle").textContent = meta.title;
+  qs("#viewSubtitle").textContent = meta.subtitle;
+  document.title = `${meta.title} · Interview-Assistant`;
+  if (window.location.hash !== `#${viewKey}`) {
+    window.history.replaceState(null, "", `#${viewKey}`);
+  }
+  if (window.innerWidth <= 1080) {
+    toggleSidebar(false);
+  }
+  updateContextSummary();
 }
 
 function renderEmpty(target, text) {
@@ -451,22 +649,11 @@ function formatDate(value) {
 function moduleLabel(moduleKey) {
   const map = {
     resume_analysis: "简历分析",
+    mock_interview: "模拟面试",
     interview_review: "面试评价",
     learning: "学习总结",
     open_source_reading: "开源项目阅读",
-  };
-  map.general_chat = "普通对话";
-  return map[moduleKey] || moduleKey;
-}
-
-function moduleLabel(moduleKey) {
-  const map = {
-    resume_analysis: "\u7b80\u5386\u5206\u6790",
-    mock_interview: "\u6a21\u62df\u9762\u8bd5",
-    interview_review: "\u9762\u8bd5\u8bc4\u4ef7",
-    learning: "\u5b66\u4e60\u603b\u7ed3",
-    open_source_reading: "\u5f00\u6e90\u9879\u76ee\u9605\u8bfb",
-    general_chat: "\u666e\u901a\u5bf9\u8bdd",
+    general_chat: "普通对话",
   };
   return map[moduleKey] || moduleKey;
 }
@@ -495,6 +682,161 @@ function historyEntries(filter = "") {
     .sort((left, right) => parseDateSafe(right.updated_at) - parseDateSafe(left.updated_at));
 }
 
+function defaultProvider() {
+  const providers = state.bootstrap?.config?.providers || [];
+  const defaultProviderId = state.bootstrap?.config?.default_provider_id || "";
+  return providers.find((provider) => provider.id === defaultProviderId) || providers[0] || null;
+}
+
+function workflowStats() {
+  const resumes = state.bootstrap?.assets?.resumes || [];
+  const projects = state.bootstrap?.assets?.projects || [];
+  const runs = state.bootstrap?.runs || [];
+  const interviews = state.bootstrap?.interviews || [];
+  return {
+    resumes,
+    projects,
+    runs,
+    interviews,
+    analysisRuns: runs.filter((run) => run.module_key === "resume_analysis"),
+    reviewRuns: runs.filter((run) => run.module_key === "interview_review"),
+    learningRuns: runs.filter((run) => run.module_key === "learning"),
+    activeInterview: interviews.find((interview) => interview.status === "active") || null,
+  };
+}
+
+function buildDashboardActions(stats) {
+  const actions = [];
+  if (!stats.resumes.length) {
+    actions.push({
+      title: "先导入一份候选人简历",
+      copy: "简历是后续分析、模拟面试和评价的起点。没有简历，整个链路无法复用上下文。",
+      view: "assets",
+      cta: "上传简历",
+    });
+  }
+  if (!stats.projects.length) {
+    actions.push({
+      title: "补齐项目证据库",
+      copy: "把项目目录或本地路径导入后，分析与面试都会更贴近真实经历，而不是空泛泛问答。",
+      view: "assets",
+      cta: "导入项目",
+    });
+  }
+  if (!stats.analysisRuns.length) {
+    actions.push({
+      title: "生成第一份简历分析",
+      copy: "建议先用简历分析把卖点、风险点和可追问项目梳理出来，再进入面试。",
+      view: "resume-analysis",
+      cta: "开始分析",
+    });
+  }
+  if (!stats.interviews.length) {
+    actions.push({
+      title: "开始一场模拟面试",
+      copy: "当素材和分析已准备好，就可以进入连续追问式训练，验证表达是否站得住。",
+      view: "mock-interview",
+      cta: "进入面试",
+    });
+  }
+  if (!stats.reviewRuns.length) {
+    actions.push({
+      title: "产出结构化面试评价",
+      copy: "把面试过程转成结构化评价后，才能形成稳定的复盘闭环，而不是凭感觉回忆。",
+      view: "interview-review",
+      cta: "生成评价",
+    });
+  }
+  if (!stats.learningRuns.length) {
+    actions.push({
+      title: "沉淀学习总结",
+      copy: "把评价结果转成长期知识资产，下一次就不需要重新从零整理问题清单。",
+      view: "learning",
+      cta: "开始沉淀",
+    });
+  }
+  return actions.slice(0, 3);
+}
+
+function nextReadinessHint(stats) {
+  if (!stats.resumes.length) return "建议先导入简历素材。";
+  if (!stats.projects.length) return "建议补充至少一个项目素材。";
+  if (!stats.analysisRuns.length) return "建议先完成一轮简历分析。";
+  if (!stats.interviews.length) return "建议开始一场模拟面试。";
+  if (!stats.reviewRuns.length) return "建议生成一份面试评价。";
+  if (!stats.learningRuns.length) return "建议把评价沉淀为学习总结。";
+  return "链路已经跑通，可以继续优化材料或回看历史记录。";
+}
+
+function updateContextSummary() {
+  const workspace = state.bootstrap?.workspace_path || "-";
+  const provider = defaultProvider();
+  const stats = workflowStats();
+  const readyCount = [
+    stats.resumes.length > 0,
+    stats.projects.length > 0,
+    stats.analysisRuns.length > 0,
+    stats.reviewRuns.length > 0 || stats.learningRuns.length > 0 || stats.interviews.length > 0,
+  ].filter(Boolean).length;
+  const activeDocumentPath = state.bootstrap?.active_document || state.resultDocs.history.path || "";
+
+  setOptionalText("#contextWorkspace", workspace);
+  setOptionalText(
+    "#contextWorkspaceHint",
+    state.workspaceOverride ? "当前页面使用了本地覆盖的 Workspace。" : "当前页面沿用全局默认 Workspace。"
+  );
+  setOptionalText("#contextProvider", provider ? providerDisplayName(provider) : "暂无供应商");
+  setOptionalText(
+    "#contextProviderHint",
+    provider
+      ? provider.provider_type === "demo"
+        ? "当前仍可用 Demo 模式直接体验全链路。"
+        : "这里显示的是默认供应商，模块里也可以单独切换。"
+      : "还没有可用供应商配置。"
+  );
+  setOptionalText("#contextActiveDoc", activeDocumentPath ? PathBasename(activeDocumentPath) : "暂无");
+  setOptionalText(
+    "#contextActiveDocHint",
+    activeDocumentPath ? activeDocumentPath : "生成或打开结果后，会在这里保留上下文。"
+  );
+  setOptionalText("#contextReadiness", `${readyCount} / 4`);
+  setOptionalText("#contextReadinessHint", nextReadinessHint(stats));
+  setOptionalText("#sidebarProgress", `${readyCount} / 4`);
+  setOptionalText("#sidebarProgressHint", nextReadinessHint(stats));
+  setElementDisabled("#jumpToActiveDocBtn", !activeDocumentPath);
+}
+
+function syncPreferencesFromDom() {
+  if (!qs("#resumeAnalysisResume")) return;
+  updateFormPreference("resumeAnalysis", {
+    resumeId: qs("#resumeAnalysisResume").value,
+    providerId: qs("#resumeAnalysisProvider").value,
+    projectIds: selectedProjectIds("#resumeAnalysisProjects"),
+  });
+  updateFormPreference("mockInterview", {
+    resumeId: qs("#mockInterviewResume").value,
+    providerId: qs("#mockInterviewProvider").value,
+    projectIds: selectedProjectIds("#mockInterviewProjects"),
+    analysisRunId: qs("#mockInterviewAnalysis").value,
+  });
+  updateFormPreference("review", {
+    interviewId: qs("#reviewInterviewSelect").value,
+    providerId: qs("#reviewProvider").value,
+  });
+  updateFormPreference("learning", {
+    reviewRunId: qs("#learningReviewSelect").value,
+    providerId: qs("#learningProvider").value,
+    projectIds: selectedProjectIds("#learningProjects"),
+  });
+  updateFormPreference("openSource", {
+    projectId: qs("#openSourceProject").value,
+    providerId: qs("#openSourceProvider").value,
+  });
+  updateFormPreference("generalChat", {
+    providerId: qs("#generalChatProvider").value,
+  });
+}
+
 function setBootstrap(bootstrap) {
   state.bootstrap = bootstrap;
   const validHistoryKeys = new Set([
@@ -503,28 +845,126 @@ function setBootstrap(bootstrap) {
   ]);
   state.selectedHistoryEntryKeys = state.selectedHistoryEntryKeys.filter((key) => validHistoryKeys.has(key));
   qs("#workspacePath").textContent = bootstrap.workspace_path || "-";
-  setOptionalText("#activeDocument", bootstrap.active_document || "-");
 
   qs("#metricResumes").textContent = `${bootstrap.assets.resumes.length}`;
   qs("#metricProjects").textContent = `${bootstrap.assets.projects.length}`;
   qs("#metricRuns").textContent = `${bootstrap.runs.length}`;
   qs("#metricInterviews").textContent = `${bootstrap.interviews.length}`;
 
+  updateContextSummary();
   renderDashboard();
   fillConfigForm();
   fillAssetLists();
   fillSelectors();
   renderHistoryList();
+  syncPreferencesFromDom();
 }
 
 function renderDashboard() {
+  const stats = workflowStats();
   const runsTarget = qs("#recentRuns");
   const interviewsTarget = qs("#recentInterviews");
   const runs = state.bootstrap.runs.slice(0, 5);
   const interviews = state.bootstrap.interviews.slice(0, 5);
+  const workflowTarget = qs("#workflowSteps");
+  const actionsTarget = qs("#recommendedActions");
+  const insightsTarget = qs("#dashboardInsights");
+
+  const workflowItems = [
+    {
+      label: "准备简历素材",
+      detail: stats.resumes.length ? `已上传 ${stats.resumes.length} 份简历` : "还没有候选人简历",
+      ready: stats.resumes.length > 0,
+      view: "assets",
+    },
+    {
+      label: "沉淀项目证据",
+      detail: stats.projects.length ? `已导入 ${stats.projects.length} 个项目` : "还没有项目素材",
+      ready: stats.projects.length > 0,
+      view: "assets",
+    },
+    {
+      label: "生成结构化分析",
+      detail: stats.analysisRuns.length ? `已生成 ${stats.analysisRuns.length} 份分析` : "建议先完成一轮简历分析",
+      ready: stats.analysisRuns.length > 0,
+      view: "resume-analysis",
+    },
+    {
+      label: "完成面试闭环",
+      detail:
+        stats.reviewRuns.length || stats.learningRuns.length
+          ? `已有 ${stats.reviewRuns.length} 份评价 / ${stats.learningRuns.length} 份总结`
+          : stats.interviews.length
+            ? `已有 ${stats.interviews.length} 场面试记录，下一步可生成评价`
+            : "还没有面试记录和复盘结果",
+      ready: stats.reviewRuns.length > 0 || stats.learningRuns.length > 0,
+      view: stats.interviews.length ? "interview-review" : "mock-interview",
+    },
+  ];
+
+  workflowTarget.innerHTML = workflowItems
+    .map(
+      (item) => `
+        <button type="button" class="workflow-step ${item.ready ? "ready" : "pending"}" data-go-view="${item.view}">
+          <span class="workflow-state">${item.ready ? "已就绪" : "待完成"}</span>
+          <strong>${item.label}</strong>
+          <span>${item.detail}</span>
+        </button>
+      `
+    )
+    .join("");
+
+  const recommendedActions = buildDashboardActions(stats);
+  if (!recommendedActions.length) {
+    actionsTarget.innerHTML = `<div class="empty">主流程已经跑通了。现在更适合继续打磨材料、查看历史记录，或者开始下一轮模拟面试。</div>`;
+  } else {
+    actionsTarget.innerHTML = recommendedActions
+      .map(
+        (action) => `
+          <article class="action-card">
+            <strong>${action.title}</strong>
+            <p>${action.copy}</p>
+            <button type="button" class="ghost-btn" data-go-view="${action.view}">${action.cta}</button>
+          </article>
+        `
+      )
+      .join("");
+  }
+
+  const provider = defaultProvider();
+  const latestActivity = [...state.bootstrap.runs, ...state.bootstrap.interviews]
+    .sort((left, right) => parseDateSafe(right.updated_at || right.created_at) - parseDateSafe(left.updated_at || left.created_at))[0];
+
+  insightsTarget.innerHTML = [
+    {
+      title: "默认模型",
+      copy: provider ? providerDisplayName(provider) : "暂无供应商配置",
+    },
+    {
+      title: "最近活动",
+      copy: latestActivity
+        ? `${latestActivity.title || PathBasename(latestActivity.path || latestActivity.transcript_path || "")} · ${formatDate(
+            latestActivity.updated_at || latestActivity.created_at
+          )}`
+        : "还没有结果文档或面试记录",
+    },
+    {
+      title: "当前文档",
+      copy: state.bootstrap.active_document ? PathBasename(state.bootstrap.active_document) : "尚未打开结果文档",
+    },
+  ]
+    .map(
+      (item) => `
+        <article class="insight-row">
+          <strong>${item.title}</strong>
+          <span>${item.copy}</span>
+        </article>
+      `
+    )
+    .join("");
 
   if (!runs.length) {
-    renderEmpty(runsTarget, "\u8fd8\u6ca1\u6709\u7ed3\u679c\u6587\u6863\u3002");
+    renderEmpty(runsTarget, "还没有结果文档。建议先完成一轮简历分析或项目解读。");
   } else {
     runsTarget.innerHTML = runs
       .map(
@@ -535,6 +975,7 @@ function renderDashboard() {
               <span>${moduleLabel(run.module_key)}</span>
             </div>
             <p>${formatDate(run.updated_at || run.created_at)}</p>
+            <p class="item-path">${PathBasename(run.path)}</p>
             <div class="item-actions">
               <button class="ghost-btn" data-open-run="${run.path}">\u6253\u5f00</button>
               <button class="ghost-btn danger" data-delete-dashboard-run="${run.id}">\u5220\u9664</button>
@@ -546,7 +987,7 @@ function renderDashboard() {
   }
 
   if (!interviews.length) {
-    renderEmpty(interviewsTarget, "\u8fd8\u6ca1\u6709\u6a21\u62df\u9762\u8bd5\u8bb0\u5f55\u3002");
+    renderEmpty(interviewsTarget, "还没有模拟面试记录。准备好素材后，可以直接开始第一场。");
   } else {
     interviewsTarget.innerHTML = interviews
       .map(
@@ -557,6 +998,7 @@ function renderDashboard() {
               <span>${interview.status === "active" ? "\u8fdb\u884c\u4e2d" : "\u5df2\u7ed3\u675f"}</span>
             </div>
             <p>${formatDate(interview.updated_at)}</p>
+            <p class="item-path">${PathBasename(interview.transcript_path)}</p>
             <div class="item-actions">
               <button class="ghost-btn" data-open-interview="${interview.id}">\u6253\u5f00</button>
               <button class="ghost-btn danger" data-delete-dashboard-interview="${interview.id}">\u5220\u9664</button>
@@ -579,10 +1021,13 @@ function renderDashboard() {
     button.addEventListener("click", async () => {
       const interview = state.bootstrap.interviews.find((item) => item.id === button.dataset.openInterview);
       if (!interview) return;
-      const doc = await getDocument(interview.transcript_path);
+      const doc = await getDocument(interview.transcript_path, { activate: true });
       state.resultDocs.history = { path: doc.path, content: doc.content, mode: "preview" };
       renderHistoryDoc();
-      setOptionalText("#activeDocument", doc.path);
+      if (state.bootstrap) {
+        state.bootstrap.active_document = doc.path;
+      }
+      updateContextSummary();
       setView("history");
     });
   });
@@ -597,6 +1042,11 @@ function renderDashboard() {
     button.addEventListener("click", async () => {
       await deleteInterviewRecord(button.dataset.deleteDashboardInterview);
     });
+  });
+
+  qsa("[data-go-view]").forEach((button) => {
+    if (button.classList.contains("nav-item")) return;
+    button.addEventListener("click", () => setView(button.dataset.goView));
   });
 }
 
@@ -640,6 +1090,16 @@ function assetCard(asset, kind) {
     kind === "resume"
       ? `文件：${asset.filename}`
       : `文件数：${asset.file_count || 0} · ${asset.storage_mode === "reference" ? "来源：原始目录引用" : "来源：已复制到 workspace"}`;
+  const quickActions =
+    kind === "resume"
+      ? `
+        <button type="button" class="ghost-btn" data-use-resume-analysis="${asset.id}">用于简历分析</button>
+        <button type="button" class="ghost-btn" data-use-mock-resume="${asset.id}">用于模拟面试</button>
+      `
+      : `
+        <button type="button" class="ghost-btn" data-use-open-source="${asset.id}">去项目解读</button>
+        <button type="button" class="ghost-btn" data-use-resume-project="${asset.id}">加入简历分析</button>
+      `;
   return `
     <article class="item-card">
       <div class="item-title">
@@ -647,12 +1107,13 @@ function assetCard(asset, kind) {
         <span>${formatDate(asset.updated_at)}</span>
       </div>
       <p>${meta}</p>
-      <p>${asset.path}</p>
+      <p class="item-path">${asset.path}</p>
       <label>
         <span>重命名</span>
         <input type="text" value="${asset.name}" data-rename-input="${kind}:${asset.id}" />
       </label>
       <div class="item-actions">
+        ${quickActions}
         <button class="ghost-btn" data-rename-asset="${kind}:${asset.id}">保存名称</button>
         <button class="ghost-btn" data-delete-asset="${kind}:${asset.id}">删除</button>
       </div>
@@ -665,9 +1126,23 @@ function fillAssetLists() {
   const projects = state.bootstrap.assets.projects;
   const resumeList = qs("#resumeAssetList");
   const projectList = qs("#projectAssetList");
+  const query = normalizeSearch(state.ui.preferences.assetSearch);
+  const filteredResumes = resumes.filter((asset) => matchesSearch(`${asset.name} ${asset.filename || ""} ${asset.path}`, query));
+  const filteredProjects = projects.filter((asset) => matchesSearch(`${asset.name} ${asset.path}`, query));
 
-  resumeList.innerHTML = resumes.length ? resumes.map((asset) => assetCard(asset, "resume")).join("") : `<div class="empty">还没有简历素材。</div>`;
-  projectList.innerHTML = projects.length ? projects.map((asset) => assetCard(asset, "project")).join("") : `<div class="empty">还没有项目素材。</div>`;
+  setOptionalText(
+    "#assetSearchMeta",
+    query
+      ? `显示 ${filteredResumes.length + filteredProjects.length} / ${resumes.length + projects.length} 项素材`
+      : `共 ${resumes.length + projects.length} 项素材`
+  );
+
+  resumeList.innerHTML = filteredResumes.length
+    ? filteredResumes.map((asset) => assetCard(asset, "resume")).join("")
+    : `<div class="empty">${query ? "没有匹配的简历素材。" : "还没有简历素材。"}</div>`;
+  projectList.innerHTML = filteredProjects.length
+    ? filteredProjects.map((asset) => assetCard(asset, "project")).join("")
+    : `<div class="empty">${query ? "没有匹配的项目素材。" : "还没有项目素材。"}</div>`;
 
   qsa("[data-rename-asset]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -691,6 +1166,53 @@ function fillAssetLists() {
       showToast("素材已删除");
     });
   });
+
+  qsa("[data-use-resume-analysis]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      updateFormPreference("resumeAnalysis", { resumeId: button.dataset.useResumeAnalysis });
+      fillSelectors();
+      setView("resume-analysis");
+      await syncResumeAnalysisExistingResult();
+      syncResumeCoachAvailability();
+      updateActionAvailability();
+    });
+  });
+
+  qsa("[data-use-mock-resume]").forEach((button) => {
+    button.addEventListener("click", () => {
+      updateFormPreference("mockInterview", {
+        resumeId: button.dataset.useMockResume,
+        analysisRunId: "",
+      });
+      fillSelectors();
+      setView("mock-interview");
+      updateActionAvailability();
+    });
+  });
+
+  qsa("[data-use-open-source]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      updateFormPreference("openSource", { projectId: button.dataset.useOpenSource });
+      fillSelectors();
+      setView("open-source");
+      await syncOpenSourceExistingResult();
+      updateActionAvailability();
+    });
+  });
+
+  qsa("[data-use-resume-project]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const nextProjectIds = normalizeIdList([
+        ...(state.ui.preferences.forms.resumeAnalysis.projectIds || []),
+        button.dataset.useResumeProject,
+      ]);
+      updateFormPreference("resumeAnalysis", { projectIds: nextProjectIds });
+      fillSelectors();
+      setView("resume-analysis");
+      await syncResumeAnalysisExistingResult();
+      updateActionAvailability();
+    });
+  });
 }
 
 function buildProjectChecks(container, projects, selectedIds = []) {
@@ -710,63 +1232,142 @@ function buildProjectChecks(container, projects, selectedIds = []) {
     .join("");
 }
 
+function analysisRunsForResume(resumeAssetId) {
+  const runs = (state.bootstrap?.runs || []).filter((run) => run.module_key === "resume_analysis");
+  return resumeAssetId ? runs.filter((run) => (run.source?.resume_asset_id || "") === resumeAssetId) : runs;
+}
+
+function populateMockInterviewAnalysisOptions(resumeAssetId) {
+  const previousValue = qs("#mockInterviewAnalysis").value;
+  const preferredValue = state.ui.preferences.forms.mockInterview.analysisRunId || previousValue;
+  const matchingRuns = analysisRunsForResume(resumeAssetId);
+  qs("#mockInterviewAnalysis").innerHTML = `<option value="">不引用</option>${matchingRuns
+    .map((run) => `<option value="${run.id}">${PathBasename(run.path)}</option>`)
+    .join("")}`;
+  const selectedValue = applySelectValue("#mockInterviewAnalysis", [
+    preferredValue,
+    latestResumeAnalysisRunId(resumeAssetId),
+    "",
+  ]);
+  updateFormPreference("mockInterview", { analysisRunId: selectedValue });
+}
+
 function fillSelectors() {
   const resumes = state.bootstrap.assets.resumes;
   const projects = state.bootstrap.assets.projects;
-  const analysisRuns = state.bootstrap.runs.filter((run) => run.module_key === "resume_analysis");
   const reviewRuns = state.bootstrap.runs.filter((run) => run.module_key === "interview_review");
   const latestReviewRuns = latestReviewRunsByInterview(reviewRuns);
   const providers = state.bootstrap.config.providers || [];
+  const prefs = state.ui.preferences.forms;
   const defaultProviderId = state.bootstrap.config.default_provider_id || providers[0]?.id || "";
-  const previousResumeId = qs("#resumeAnalysisResume").value;
-  const previousInterviewResumeId = qs("#mockInterviewResume").value;
-  const previousInterviewId = qs("#reviewInterviewSelect").value;
-  const previousLearningReviewId = qs("#learningReviewSelect").value;
   const providerOptions = providers.length
     ? providers.map((provider) => `<option value="${provider.id}">${providerDisplayName(provider)}</option>`).join("")
     : `<option value="">暂无供应商配置</option>`;
-
   const resumeOptions = resumes.length
     ? resumes.map((asset) => `<option value="${asset.id}">${asset.name}</option>`).join("")
     : `<option value="">暂无简历素材</option>`;
+  const projectOptions = projects.length
+    ? projects.map((project) => `<option value="${project.id}">${project.name}</option>`).join("")
+    : `<option value="">暂无项目素材</option>`;
+
+  const previousValues = {
+    resumeAnalysisResume: qs("#resumeAnalysisResume").value,
+    mockInterviewResume: qs("#mockInterviewResume").value,
+    reviewInterview: qs("#reviewInterviewSelect").value,
+    learningReview: qs("#learningReviewSelect").value,
+    openSourceProject: qs("#openSourceProject").value,
+    resumeAnalysisProvider: qs("#resumeAnalysisProvider").value,
+    mockInterviewProvider: qs("#mockInterviewProvider").value,
+    reviewProvider: qs("#reviewProvider").value,
+    learningProvider: qs("#learningProvider").value,
+    openSourceProvider: qs("#openSourceProvider").value,
+    generalChatProvider: qs("#generalChatProvider").value,
+  };
 
   ["#resumeAnalysisResume", "#mockInterviewResume"].forEach((selector) => {
     qs(selector).innerHTML = resumeOptions;
   });
-  if (resumes.some((asset) => asset.id === previousResumeId)) {
-    qs("#resumeAnalysisResume").value = previousResumeId;
-  }
-  if (resumes.some((asset) => asset.id === previousInterviewResumeId)) {
-    qs("#mockInterviewResume").value = previousInterviewResumeId;
-  }
-
-  qs("#mockInterviewAnalysis").innerHTML = `<option value="">不引用</option>${analysisRuns
-    .map((run) => `<option value="${run.id}">${PathBasename(run.path)}</option>`)
-    .join("")}`;
   qs("#reviewInterviewSelect").innerHTML = state.bootstrap.interviews.length
     ? state.bootstrap.interviews.map((item) => `<option value="${item.id}">${item.title}</option>`).join("")
     : `<option value="">暂无面试记录</option>`;
-  if (state.bootstrap.interviews.some((item) => item.id === previousInterviewId)) {
-    qs("#reviewInterviewSelect").value = previousInterviewId;
-  }
   qs("#learningReviewSelect").innerHTML = latestReviewRuns.length
     ? latestReviewRuns.map((run) => `<option value="${run.id}">${reviewRunLabel(run)}</option>`).join("")
     : `<option value="">暂无面试评价</option>`;
-  if (latestReviewRuns.some((run) => run.id === previousLearningReviewId)) {
-    qs("#learningReviewSelect").value = previousLearningReviewId;
-  }
-  qs("#openSourceProject").innerHTML = projects.length
-    ? projects.map((project) => `<option value="${project.id}">${project.name}</option>`).join("")
-    : `<option value="">暂无项目素材</option>`;
+  qs("#openSourceProject").innerHTML = projectOptions;
 
   ["#resumeAnalysisProvider", "#mockInterviewProvider", "#reviewProvider", "#learningProvider", "#openSourceProvider", "#generalChatProvider"].forEach((selector) => {
     qs(selector).innerHTML = providerOptions;
-    qs(selector).value = defaultProviderId;
   });
 
-  buildProjectChecks(qs("#resumeAnalysisProjects"), projects);
-  buildProjectChecks(qs("#mockInterviewProjects"), projects);
+  const selectedResumeAnalysisResume = applySelectValue("#resumeAnalysisResume", [
+    prefs.resumeAnalysis.resumeId,
+    previousValues.resumeAnalysisResume,
+    resumes[0]?.id,
+    "",
+  ]);
+  const selectedMockInterviewResume = applySelectValue("#mockInterviewResume", [
+    prefs.mockInterview.resumeId,
+    previousValues.mockInterviewResume,
+    selectedResumeAnalysisResume,
+    resumes[0]?.id,
+    "",
+  ]);
+  const selectedReviewInterview = applySelectValue("#reviewInterviewSelect", [
+    prefs.review.interviewId,
+    previousValues.reviewInterview,
+    state.bootstrap.interviews[0]?.id,
+    "",
+  ]);
+  const selectedLearningReview = applySelectValue("#learningReviewSelect", [
+    prefs.learning.reviewRunId,
+    previousValues.learningReview,
+    latestReviewRuns[0]?.id,
+    "",
+  ]);
+  const selectedOpenSourceProject = applySelectValue("#openSourceProject", [
+    prefs.openSource.projectId,
+    previousValues.openSourceProject,
+    projects[0]?.id,
+    "",
+  ]);
+
+  applySelectValue("#resumeAnalysisProvider", [
+    prefs.resumeAnalysis.providerId,
+    previousValues.resumeAnalysisProvider,
+    defaultProviderId,
+  ]);
+  applySelectValue("#mockInterviewProvider", [
+    prefs.mockInterview.providerId,
+    previousValues.mockInterviewProvider,
+    defaultProviderId,
+  ]);
+  applySelectValue("#reviewProvider", [
+    prefs.review.providerId,
+    previousValues.reviewProvider,
+    defaultProviderId,
+  ]);
+  applySelectValue("#learningProvider", [
+    prefs.learning.providerId,
+    previousValues.learningProvider,
+    defaultProviderId,
+  ]);
+  applySelectValue("#openSourceProvider", [
+    prefs.openSource.providerId,
+    previousValues.openSourceProvider,
+    defaultProviderId,
+  ]);
+  applySelectValue("#generalChatProvider", [
+    prefs.generalChat.providerId,
+    previousValues.generalChatProvider,
+    defaultProviderId,
+  ]);
+
+  populateMockInterviewAnalysisOptions(selectedMockInterviewResume);
+  buildProjectChecks(qs("#resumeAnalysisProjects"), projects, prefs.resumeAnalysis.projectIds.filter((id) => projects.some((project) => project.id === id)));
+  buildProjectChecks(qs("#mockInterviewProjects"), projects, prefs.mockInterview.projectIds.filter((id) => projects.some((project) => project.id === id)));
   syncLearningProjectChecks();
+  applySelectValue("#learningReviewSelect", [selectedLearningReview]);
+  applySelectValue("#openSourceProject", [selectedOpenSourceProject]);
 }
 
 function PathBasename(path) {
@@ -817,7 +1418,8 @@ function syncLearningProjectChecks() {
   const reviewRunId = qs("#learningReviewSelect").value;
   const learningRun = latestLearningRunByReview(reviewRunId);
   const reviewRun = reviewRunById(reviewRunId);
-  const selectedIds = learningRun?.source?.project_asset_ids || reviewRun?.source?.project_asset_ids || [];
+  const preferredIds = state.ui.preferences.forms.learning.projectIds;
+  const selectedIds = preferredIds.length ? preferredIds : learningRun?.source?.project_asset_ids || reviewRun?.source?.project_asset_ids || [];
   buildProjectChecks(qs("#learningProjects"), state.bootstrap?.assets?.projects || [], selectedIds);
 }
 
@@ -833,12 +1435,14 @@ async function loadExistingLearningResult() {
     } else {
       setStatus("#learningStatus", "请先选择一份面试评价。");
     }
+    syncPreferencesFromDom();
     return;
   }
   const doc = await getDocument(existingRun.path);
   state.resultDocs.learning = { path: doc.path, content: doc.content, mode: "preview" };
   renderManagedResultDoc("learning", "#learningResult", "#learningSaveBtn", "learningEditor", "#learningApplyCommentsBtn");
   setStatus("#learningStatus", "已加载这份面试评价对应的学习总结。");
+  syncPreferencesFromDom();
 }
 
 function selectedProjectIds(containerSelector) {
@@ -864,7 +1468,10 @@ async function deleteHistoryEntries(entryKeys, confirmMessage, successMessage) {
   if (pathsToDelete.has(state.resultDocs.history.path)) {
     state.resultDocs.history = { path: "", content: "", mode: "preview" };
     renderHistoryDoc();
-    setOptionalText("#activeDocument", "-");
+    if (state.bootstrap) {
+      state.bootstrap.active_document = "";
+    }
+    updateContextSummary();
   }
   if (deletedRunIds.has(state.generalChatRunId)) {
     state.generalChatRunId = "";
@@ -902,14 +1509,22 @@ async function deleteInterviewRecord(interviewId) {
 
 function renderHistoryList() {
   const filter = qs("#historyModuleFilter").value;
-  const entries = historyEntries(filter);
+  const searchQuery = normalizeSearch(state.ui.preferences.historySearch);
+  const sourceEntries = historyEntries(filter);
+  const entries = sourceEntries.filter((entry) =>
+    matchesSearch(`${entry.title} ${PathBasename(entry.path)} ${moduleLabel(entry.module_key)}`, searchQuery)
+  );
   const target = qs("#historyList");
   const selectedEntryKeys = new Set(state.selectedHistoryEntryKeys);
   const filteredEntryKeys = entries.map((entry) => entry.key);
   const selectedFilteredCount = filteredEntryKeys.filter((key) => selectedEntryKeys.has(key)).length;
   const allFilteredSelected = filteredEntryKeys.length > 0 && selectedFilteredCount === filteredEntryKeys.length;
+  setOptionalText(
+    "#historySearchMeta",
+    searchQuery ? `显示 ${entries.length} / ${sourceEntries.length} 条记录` : `共 ${sourceEntries.length} 条记录`
+  );
   if (!entries.length) {
-    renderEmpty(target, "\u6682\u65e0\u6587\u6863\u3002");
+    renderEmpty(target, searchQuery ? "没有匹配的文档记录。" : "暂无文档。");
     return;
   }
   target.innerHTML = `
@@ -999,16 +1614,28 @@ function renderHistoryList() {
 }
 
 async function openHistoryDocument(path) {
-  const doc = await getDocument(path);
+  const doc = await getDocument(path, { activate: true });
   state.resultDocs.history = { path: doc.path, content: doc.content, mode: "preview" };
   renderHistoryDoc();
-  setOptionalText("#activeDocument", doc.path);
+  if (state.bootstrap) {
+    state.bootstrap.active_document = doc.path;
+  }
+  updateContextSummary();
 }
 
 async function refreshBootstrap() {
   const bootstrap = await api("/api/bootstrap");
   setBootstrap(bootstrap);
   await loadExistingLearningResult();
+  await syncResumeAnalysisExistingResult();
+  await syncReviewExistingResult();
+  await syncOpenSourceExistingResult();
+  if (state.ui.currentView === "history" && state.bootstrap?.active_document && state.resultDocs.history.path !== state.bootstrap.active_document) {
+    await openHistoryDocument(state.bootstrap.active_document);
+  }
+  syncResumeCoachAvailability();
+  updateActionAvailability();
+  updateContextSummary();
 }
 
 async function fileToText(file) {
@@ -1130,10 +1757,159 @@ function latestResumeAnalysisRunId(resumeAssetId) {
   return matched[0]?.id || "";
 }
 
+function latestResumeAnalysisRun(resumeAssetId, projectIds = []) {
+  const runs = (state.bootstrap?.runs || [])
+    .filter((run) => run.module_key === "resume_analysis")
+    .filter((run) => !resumeAssetId || (run.source?.resume_asset_id || run.metadata?.resume_asset_id || "") === resumeAssetId);
+  if (!runs.length) return null;
+  if (projectIds.length) {
+    const exactMatch = runs.find((run) => sameIdSet(run.source?.project_asset_ids || [], projectIds));
+    if (exactMatch) return exactMatch;
+  }
+  return runs[0];
+}
+
+function latestReviewRun(interviewId) {
+  return (
+    (state.bootstrap?.runs || [])
+      .filter((run) => run.module_key === "interview_review")
+      .find((run) => (run.source?.interview_id || "") === interviewId) || null
+  );
+}
+
+function latestOpenSourceRun(projectAssetId) {
+  return (
+    (state.bootstrap?.runs || [])
+      .filter((run) => run.module_key === "open_source_reading")
+      .find((run) => (run.source?.project_asset_id || "") === projectAssetId) || null
+  );
+}
+
+async function syncResumeAnalysisExistingResult() {
+  const resumeId = qs("#resumeAnalysisResume").value;
+  const projectIds = selectedProjectIds("#resumeAnalysisProjects");
+  if (!resumeId) {
+    state.resultDocs.resumeAnalysis = { path: "", content: "", mode: "preview" };
+    renderDoc(qs("#resumeAnalysisResult"), state.resultDocs.resumeAnalysis);
+    setStatus("#resumeAnalysisStatus", "请先选择一份简历。");
+    return;
+  }
+  const run = latestResumeAnalysisRun(resumeId, projectIds);
+  if (!run) {
+    state.resultDocs.resumeAnalysis = { path: "", content: "", mode: "preview" };
+    renderDoc(qs("#resumeAnalysisResult"), state.resultDocs.resumeAnalysis);
+    setStatus("#resumeAnalysisStatus", "当前这组简历与项目还没有历史分析，点击“生成分析”开始。");
+    return;
+  }
+  if (state.resultDocs.resumeAnalysis.path !== run.path) {
+    const doc = await getDocument(run.path);
+    state.resultDocs.resumeAnalysis = { path: doc.path, content: doc.content, mode: "preview" };
+    renderDoc(qs("#resumeAnalysisResult"), state.resultDocs.resumeAnalysis);
+  }
+  setStatus(
+    "#resumeAnalysisStatus",
+    `已自动载入最近一次分析：${formatDate(run.updated_at || run.created_at)}。如果当前项目组合不同，可重新生成。`
+  );
+}
+
+async function syncReviewExistingResult() {
+  const interviewId = qs("#reviewInterviewSelect").value;
+  if (!interviewId) {
+    state.resultDocs.review = { path: "", content: "", mode: "preview" };
+    renderDoc(qs("#reviewResult"), state.resultDocs.review);
+    setStatus("#reviewStatus", "请先选择一条面试记录。");
+    return;
+  }
+  const run = latestReviewRun(interviewId);
+  if (!run) {
+    state.resultDocs.review = { path: "", content: "", mode: "preview" };
+    renderDoc(qs("#reviewResult"), state.resultDocs.review);
+    setStatus("#reviewStatus", "当前面试记录还没有评价，点击“生成评价”开始。");
+    return;
+  }
+  if (state.resultDocs.review.path !== run.path) {
+    const doc = await getDocument(run.path);
+    state.resultDocs.review = { path: doc.path, content: doc.content, mode: "preview" };
+    renderDoc(qs("#reviewResult"), state.resultDocs.review);
+  }
+  setStatus("#reviewStatus", `已自动载入最近一次评价：${formatDate(run.updated_at || run.created_at)}。`);
+}
+
+async function syncOpenSourceExistingResult() {
+  const projectId = qs("#openSourceProject").value;
+  if (!projectId) {
+    state.resultDocs.openSource = { path: "", content: "", mode: "preview" };
+    renderDoc(qs("#openSourceResult"), state.resultDocs.openSource);
+    setStatus("#openSourceStatus", "请先选择一个项目素材。");
+    return;
+  }
+  const run = latestOpenSourceRun(projectId);
+  if (!run) {
+    state.resultDocs.openSource = { path: "", content: "", mode: "preview" };
+    renderDoc(qs("#openSourceResult"), state.resultDocs.openSource);
+    setStatus("#openSourceStatus", "当前项目还没有历史解读，点击“生成解读”开始。");
+    return;
+  }
+  if (state.resultDocs.openSource.path !== run.path) {
+    const doc = await getDocument(run.path);
+    state.resultDocs.openSource = { path: doc.path, content: doc.content, mode: "preview" };
+    renderDoc(qs("#openSourceResult"), state.resultDocs.openSource);
+  }
+  setStatus("#openSourceStatus", `已自动载入最近一次项目解读：${formatDate(run.updated_at || run.created_at)}。`);
+}
+
+function setButtonAvailability(selector, enabled, tooltip = "") {
+  const button = qs(selector);
+  if (!button) return;
+  button.disabled = !enabled;
+  if (enabled) {
+    button.removeAttribute("title");
+  } else if (tooltip) {
+    button.title = tooltip;
+  }
+}
+
+function updateActionAvailability() {
+  const hasResumeForAnalysis = Boolean(qs("#resumeAnalysisResume").value && qs("#resumeAnalysisProvider").value);
+  const hasResumeForInterview = Boolean(qs("#mockInterviewResume").value && qs("#mockInterviewProvider").value);
+  const hasInterviewForReview = Boolean(qs("#reviewInterviewSelect").value && qs("#reviewProvider").value);
+  const hasReviewForLearning = Boolean(qs("#learningReviewSelect").value && qs("#learningProvider").value);
+  const hasProjectForOpenSource = Boolean(qs("#openSourceProject").value && qs("#openSourceProvider").value);
+  const hasProviderForChat = Boolean(qs("#generalChatProvider").value);
+  const hasResumeForCoach = Boolean(qs("#resumeAnalysisResume").value && qs("#resumeAnalysisProvider").value);
+
+  setButtonAvailability('#resumeAnalysisForm button[type="submit"]', hasResumeForAnalysis, "先准备简历和模型配置");
+  setButtonAvailability('#mockInterviewForm button[type="submit"]', hasResumeForInterview, "先准备简历和模型配置");
+  setButtonAvailability('#reviewForm button[type="submit"]', hasInterviewForReview, "先选择面试记录和模型");
+  setButtonAvailability('#learningForm button[type="submit"]', hasReviewForLearning, "先选择面试评价和模型");
+  setButtonAvailability('#openSourceForm button[type="submit"]', hasProjectForOpenSource, "先选择项目和模型");
+  setButtonAvailability('#generalChatForm button[type="submit"]', hasProviderForChat, "先选择模型配置");
+  setButtonAvailability('#resumeCoachForm button[type="submit"]', hasResumeForCoach, "先选择简历和模型配置");
+}
+
+function syncResumeCoachAvailability() {
+  const resumeAssetId = qs("#resumeAnalysisResume").value;
+  if (!resumeAssetId) {
+    setStatus("#resumeCoachStatus", "先选择简历，再让 AI 帮你逐轮优化表述。");
+    return;
+  }
+  const latestRunId = latestResumeAnalysisRunId(resumeAssetId);
+  if (!latestRunId && !state.resumeCoachMessages.length) {
+    setStatus("#resumeCoachStatus", "还没有历史分析，AI 也可以直接提修改建议，但建议先生成一版分析。");
+    return;
+  }
+  if (!state.resumeCoachMessages.length) {
+    setStatus("#resumeCoachStatus", "已检测到最近一次简历分析，可直接继续追问并迭代修改。");
+  }
+}
+
 async function loadInterviewMessages(interview) {
-  const doc = await getDocument(interview.transcript_path);
+  const doc = await getDocument(interview.transcript_path, { activate: true });
   state.resultDocs.history = { path: doc.path, content: doc.content, mode: "preview" };
-  setOptionalText("#activeDocument", doc.path);
+  if (state.bootstrap) {
+    state.bootstrap.active_document = doc.path;
+  }
+  updateContextSummary();
 }
 
 async function syncInterviewAfterStream(interview, messages, finalStatus) {
@@ -1264,12 +2040,38 @@ function setupSpeechRecognition() {
 
 function bindEvents() {
   qsa(".nav-item").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
+  qs("#navToggleBtn")?.addEventListener("click", () => toggleSidebar(true));
+  qs("#sidebarCloseBtn")?.addEventListener("click", () => toggleSidebar(false));
+  qs("#navBackdrop")?.addEventListener("click", () => toggleSidebar(false));
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.ui.sidebarOpen) {
+      toggleSidebar(false);
+    }
+  });
   qs("#refreshBtn").addEventListener("click", async () => {
     await refreshBootstrap();
     showToast("数据已刷新");
   });
+  qs("#jumpToActiveDocBtn")?.addEventListener("click", async () => {
+    const path = state.bootstrap?.active_document || state.resultDocs.history.path;
+    if (!path) return;
+    await openHistoryDocument(path);
+    setView("history");
+  });
 
-  qs("#historyModuleFilter").addEventListener("change", renderHistoryList);
+  qs("#historyModuleFilter").addEventListener("change", () => {
+    renderHistoryList();
+  });
+  qs("#historySearchInput").addEventListener("input", (event) => {
+    state.ui.preferences.historySearch = event.currentTarget.value;
+    persistUiPreferences();
+    renderHistoryList();
+  });
+  qs("#assetSearchInput").addEventListener("input", (event) => {
+    state.ui.preferences.assetSearch = event.currentTarget.value;
+    persistUiPreferences();
+    fillAssetLists();
+  });
   qs("#applyWorkspaceBtn")?.addEventListener("click", async () => {
     const form = qs("#configForm");
     persistWorkspaceOverride(form?.workspace_path?.value || "");
@@ -1301,7 +2103,80 @@ function bindEvents() {
   wireModeButtons("#openSourcePreviewBtn", "#openSourceSourceBtn", "openSource", "#openSourceResult");
   wireModeButtons("#historyPreviewBtn", "#historySourceBtn", "history", "#historyDocument");
   qs("#learningReviewSelect").addEventListener("change", async () => {
+    updateFormPreference("learning", { reviewRunId: qs("#learningReviewSelect").value, projectIds: [] });
     await loadExistingLearningResult();
+    updateActionAvailability();
+  });
+
+  qs("#resumeAnalysisResume").addEventListener("change", async () => {
+    updateFormPreference("resumeAnalysis", { resumeId: qs("#resumeAnalysisResume").value });
+    await syncResumeAnalysisExistingResult();
+    syncResumeCoachAvailability();
+    updateActionAvailability();
+  });
+  qs("#resumeAnalysisProvider").addEventListener("change", () => {
+    updateFormPreference("resumeAnalysis", { providerId: qs("#resumeAnalysisProvider").value });
+    syncResumeCoachAvailability();
+    updateActionAvailability();
+  });
+  qs("#resumeAnalysisProjects").addEventListener("change", async (event) => {
+    if (!event.target.matches('input[type="checkbox"]')) return;
+    updateFormPreference("resumeAnalysis", { projectIds: selectedProjectIds("#resumeAnalysisProjects") });
+    await syncResumeAnalysisExistingResult();
+  });
+
+  qs("#mockInterviewResume").addEventListener("change", () => {
+    updateFormPreference("mockInterview", {
+      resumeId: qs("#mockInterviewResume").value,
+      analysisRunId: "",
+    });
+    populateMockInterviewAnalysisOptions(qs("#mockInterviewResume").value);
+    updateActionAvailability();
+  });
+  qs("#mockInterviewProvider").addEventListener("change", () => {
+    updateFormPreference("mockInterview", { providerId: qs("#mockInterviewProvider").value });
+    updateActionAvailability();
+  });
+  qs("#mockInterviewProjects").addEventListener("change", (event) => {
+    if (!event.target.matches('input[type="checkbox"]')) return;
+    updateFormPreference("mockInterview", { projectIds: selectedProjectIds("#mockInterviewProjects") });
+  });
+  qs("#mockInterviewAnalysis").addEventListener("change", () => {
+    updateFormPreference("mockInterview", { analysisRunId: qs("#mockInterviewAnalysis").value });
+  });
+
+  qs("#reviewInterviewSelect").addEventListener("change", async () => {
+    updateFormPreference("review", { interviewId: qs("#reviewInterviewSelect").value });
+    await syncReviewExistingResult();
+    updateActionAvailability();
+  });
+  qs("#reviewProvider").addEventListener("change", () => {
+    updateFormPreference("review", { providerId: qs("#reviewProvider").value });
+    updateActionAvailability();
+  });
+
+  qs("#learningProvider").addEventListener("change", () => {
+    updateFormPreference("learning", { providerId: qs("#learningProvider").value });
+    updateActionAvailability();
+  });
+  qs("#learningProjects").addEventListener("change", (event) => {
+    if (!event.target.matches('input[type="checkbox"]')) return;
+    updateFormPreference("learning", { projectIds: selectedProjectIds("#learningProjects") });
+  });
+
+  qs("#openSourceProject").addEventListener("change", async () => {
+    updateFormPreference("openSource", { projectId: qs("#openSourceProject").value });
+    await syncOpenSourceExistingResult();
+    updateActionAvailability();
+  });
+  qs("#openSourceProvider").addEventListener("change", () => {
+    updateFormPreference("openSource", { providerId: qs("#openSourceProvider").value });
+    updateActionAvailability();
+  });
+
+  qs("#generalChatProvider").addEventListener("change", () => {
+    updateFormPreference("generalChat", { providerId: qs("#generalChatProvider").value });
+    updateActionAvailability();
   });
 
   qs("#voiceToggleBtn").addEventListener("click", () => {
@@ -1842,6 +2717,9 @@ function bindEvents() {
 async function init() {
   bindEvents();
   setupSpeechRecognition();
+  qs("#assetSearchInput").value = state.ui.preferences.assetSearch;
+  qs("#historySearchInput").value = state.ui.preferences.historySearch;
+  setView(resolveInitialView());
   renderEmpty(qs("#resumeAnalysisResult"), "生成简历分析后会显示在这里。");
   renderEmpty(qs("#reviewResult"), "生成评价后会显示在这里。");
   renderEmpty(qs("#learningResult"), "生成学习总结后会显示在这里。");

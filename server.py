@@ -2627,6 +2627,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 path = Path(target)
                 if not path.exists():
                     raise FileNotFoundError(f"文件不存在: {path}")
+                activate = (query.get("activate", ["0"])[0] or "").strip() in {"1", "true", "yes"}
+                if activate:
+                    with_state(lambda workspace, state, config: state.__setitem__("active_document", str(path)), self.workspace_override_from_request(parsed))
                 self.send_json({"ok": True, "data": {"path": str(path), "content": path.read_text(encoding='utf-8')}})
                 return
             self.send_error_json("未知 API", status=404)
